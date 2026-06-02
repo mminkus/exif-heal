@@ -15,8 +15,9 @@ from .cache import MetadataCache
 from .confidence import parse_confidence
 from .models import Confidence, GPSCoord, GPSHint, ScanConfig
 from .scanner import scan
+from .shifter import make_offset_transform, make_zone_transform, parse_offset, run_shift
 
-DEFAULT_EXTENSIONS = "jpg,jpeg,dng,heic,png,mp4,mov,3gp"
+DEFAULT_EXTENSIONS = "jpg,jpeg,dng,heic,png,mp4,mov,m4v,3gp"
 
 
 def _parse_gps(value: str) -> GPSCoord:
@@ -94,8 +95,6 @@ def main():
               help="Only process files missing GPS")
 @click.option("--limit", type=int, default=None,
               help="Stop after N proposed changes")
-@click.option("--timezone", default=None,
-              help="IANA timezone for ambiguous times")
 @click.option("--allow-jumps", is_flag=True,
               help="Allow GPS jumps beyond max-distance-km")
 @click.option("--allow-low-confidence", is_flag=True,
@@ -112,14 +111,16 @@ def main():
               help="Path to JSON file with time-period GPS defaults")
 @click.option("--print-plan", is_flag=True,
               help="Print table of proposed changes")
+@click.option("--jobs", "-j", type=int, default=None,
+              help="Parallel exiftool reads (default: # CPU cores)")
 @click.option("--verbose", "-v", is_flag=True,
               help="Enable debug logging")
 def scan_cmd(root, ext, recursive, exclude_glob, no_default_excludes,
              report, cache_path, max_time_gap, max_distance_km,
-             only_missing_time, only_missing_gps, limit, timezone,
+             only_missing_time, only_missing_gps, limit,
              allow_jumps, allow_low_confidence, min_confidence_time,
              min_confidence_gps, force, default_gps, gps_hints,
-             print_plan, verbose):
+             print_plan, jobs, verbose):
     """Scan files and propose EXIF changes."""
     _setup_logging(verbose)
 
@@ -146,7 +147,6 @@ def scan_cmd(root, ext, recursive, exclude_glob, no_default_excludes,
         only_missing_time=only_missing_time,
         only_missing_gps=only_missing_gps,
         limit=limit,
-        timezone=timezone,
         allow_jumps=allow_jumps,
         allow_low_confidence=allow_low_confidence,
         min_confidence_time=min_time,
@@ -160,7 +160,7 @@ def scan_cmd(root, ext, recursive, exclude_glob, no_default_excludes,
 
     with MetadataCache(Path(cache_path)) as cache:
         with open(report, "w") as report_file:
-            scan(config, cache, report_file, print_plan=print_plan)
+            scan(config, cache, report_file, print_plan=print_plan, jobs=jobs)
 
     print(f"Report written to: {report}")
     print(f"Cache stored at:   {cache_path}")
@@ -186,15 +186,13 @@ def scan_cmd(root, ext, recursive, exclude_glob, no_default_excludes,
               help="Disable writing XMP ExifHeal provenance tags")
 @click.option("--no-xmp-mirror", is_flag=True,
               help="Disable mirroring EXIF tags to XMP equivalents")
-@click.option("--write-xmp-sidecar", is_flag=True,
-              help="Force XMP sidecars for DNG")
 @click.option("--limit", type=int, default=None,
               help="Apply changes to at most N files")
 @click.option("--verbose", "-v", is_flag=True,
               help="Enable debug logging")
 def apply_cmd(root, cache_path, commit, backup_dir,
               allow_low_confidence, min_confidence_time, min_confidence_gps,
-              no_tag_provenance, no_xmp_mirror, write_xmp_sidecar,
+              no_tag_provenance, no_xmp_mirror,
               limit, verbose):
     """Apply proposed EXIF changes from a previous scan."""
     _setup_logging(verbose)
@@ -216,11 +214,85 @@ def apply_cmd(root, cache_path, commit, backup_dir,
             min_confidence_gps=min_gps,
             tag_provenance=not no_tag_provenance,
             xmp_mirror=not no_xmp_mirror,
-            write_xmp_sidecar=write_xmp_sidecar,
             limit=limit,
         )
+
+
+@main.command()
+@click.option("--root", required=True, type=click.Path(exists=True, file_okay=False),
+              help="Root directory containing the batch to correct")
+@click.option("--ext", default="dng,arw,jpg,jpeg",
+              help="Comma-separated file extensions to shift")
+@click.option("--recursive/--no-recursive", default=True,
+              help="Recurse into subdirectories")
+@click.option("--exclude-glob", multiple=True,
+              help="Glob pattern for dirs/files to skip (repeatable)")
+@click.option("--from-tz", default=None,
+              help="Wrong IANA zone the clock was set to (e.g. America/Los_Angeles)")
+@click.option("--to-tz", default=None,
+              help="Correct IANA zone (e.g. Europe/Berlin). Use with --from-tz")
+@click.option("--shift", "shift_offset", default=None,
+              help="Fixed signed offset instead of zones, e.g. '+9:00' or '-5:30'")
+@click.option("--make", "make_filter", default=None,
+              help="Only shift files whose Make/Model contains this substring")
+@click.option("--commit", is_flag=True,
+              help="Actually write changes (default is dry-run)")
+@click.option("--backup-dir", type=click.Path(), default=None,
+              help="Copy originals here before modifying")
+@click.option("--limit", type=int, default=None,
+              help="Shift at most N files")
+@click.option("--verbose", "-v", is_flag=True,
+              help="Enable debug logging")
+def shift_cmd(root, ext, recursive, exclude_glob, from_tz, to_tz, shift_offset,
+              make_filter, commit, backup_dir, limit, verbose):
+    """Correct wrong embedded timestamps by shifting them (timezone repair).
+
+    Shifts DateTimeOriginal/CreateDate/ModifyDate on files that already have
+    them — for batches where the camera clock was set to the wrong timezone.
+    Specify EITHER --from-tz/--to-tz (DST-aware) OR a fixed --shift offset.
+    GPS is never touched. Dry-run by default.
+    """
+    _setup_logging(verbose)
+
+    extensions = [e.strip().lower() for e in ext.split(",")]
+
+    using_zones = bool(from_tz or to_tz)
+    if using_zones and shift_offset:
+        raise click.UsageError("Use either --from-tz/--to-tz or --shift, not both.")
+    if using_zones:
+        if not (from_tz and to_tz):
+            raise click.UsageError("--from-tz and --to-tz must be given together.")
+        try:
+            transform = make_zone_transform(from_tz, to_tz)
+        except ValueError as e:
+            raise click.BadParameter(str(e))
+        desc = f"{from_tz} -> {to_tz}"
+    elif shift_offset:
+        try:
+            transform = make_offset_transform(parse_offset(shift_offset))
+        except ValueError as e:
+            raise click.BadParameter(str(e))
+        desc = f"offset {shift_offset}"
+    else:
+        raise click.UsageError(
+            "Specify a correction: --from-tz/--to-tz or --shift '+H:MM'."
+        )
+
+    print(f"Shift mode: {desc}")
+    run_shift(
+        root=Path(root),
+        extensions=extensions,
+        transform=transform,
+        recursive=recursive,
+        exclude_globs=list(exclude_glob),
+        make_filter=make_filter,
+        commit=commit,
+        backup_dir=Path(backup_dir) if backup_dir else None,
+        limit=limit,
+    )
 
 
 # Register subcommands
 main.add_command(scan_cmd, "scan")
 main.add_command(apply_cmd, "apply")
+main.add_command(shift_cmd, "shift")

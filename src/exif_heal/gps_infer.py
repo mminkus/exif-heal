@@ -47,16 +47,30 @@ def compute_folder_centroid(files: list[FileRecord]) -> Optional[GPSCoord]:
     return GPSCoord(lat=mean_lat, lon=mean_lon)
 
 
+def _effective_time(record: FileRecord, use_mtime: bool):
+    """Time basis for GPS gap matching.
+
+    When use_mtime is False (bulk-copied directory), file mtime is meaningless
+    as evidence, so we require a real capture/filename time and return None
+    otherwise — preventing bogus matches between files that merely share mtime.
+    """
+    t = record.capture_time or record.filename_time
+    if t is None and use_mtime:
+        t = record.file_mtime
+    return t
+
+
 def find_gps_neighbor(
     target: FileRecord,
     files: list[FileRecord],
     max_gap_seconds: int,
+    use_mtime: bool = True,
 ) -> Optional[FileRecord]:
     """Find the file with GPS closest in capture_time to the target.
 
     Must be within max_gap_seconds. Returns None if no suitable neighbor.
     """
-    target_time = target.capture_time or target.filename_time or target.file_mtime
+    target_time = _effective_time(target, use_mtime)
     if target_time is None:
         return None
 
@@ -69,7 +83,7 @@ def find_gps_neighbor(
         if f.gps is None:
             continue
 
-        f_time = f.capture_time or f.filename_time or f.file_mtime
+        f_time = _effective_time(f, use_mtime)
         if f_time is None:
             continue
 
@@ -110,6 +124,7 @@ def infer_gps(
     gps_hints: Optional[list[GPSHint]] = None,
     existing_changes: Optional[dict] = None,
     force: bool = False,
+    use_mtime: bool = True,
 ) -> list[ProposedChange]:
     """Infer GPS for files missing it.
 
@@ -136,7 +151,7 @@ def infer_gps(
         if record.has_gps and not force:
             continue
 
-        neighbor = find_gps_neighbor(record, files, max_time_gap)
+        neighbor = find_gps_neighbor(record, files, max_time_gap, use_mtime=use_mtime)
 
         coord: Optional[GPSCoord] = None
         confidence = Confidence.NONE
@@ -149,9 +164,10 @@ def infer_gps(
             coord = neighbor.gps
             neighbors_gps.append(str(neighbor.path))
 
-            # Determine confidence based on time gap
-            target_time = record.capture_time or record.filename_time or record.file_mtime
-            neighbor_time = neighbor.capture_time or neighbor.filename_time or neighbor.file_mtime
+            # Determine confidence based on time gap (same time basis as
+            # neighbor selection — no mtime in bulk-copied dirs).
+            target_time = _effective_time(record, use_mtime)
+            neighbor_time = _effective_time(neighbor, use_mtime)
             gap = abs((target_time - neighbor_time).total_seconds())
 
             if gap < 3600:  # < 1 hour

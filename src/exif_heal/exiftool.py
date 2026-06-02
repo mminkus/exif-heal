@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 
 EXIFTOOL = "exiftool"
 
+# Config defining the custom XMP-exifheal:* provenance namespace. Required
+# (via -config) to WRITE those tags; reads work without it. Empty list if the
+# bundled config is somehow missing, in which case provenance is skipped.
+CONFIG_PATH = Path(__file__).parent / "exiftool_config"
+HAS_CONFIG = CONFIG_PATH.exists()
+CONFIG_ARGS = ["-config", str(CONFIG_PATH)] if HAS_CONFIG else []
+
 # Tags we request (using -G1 group names for unambiguous JSON keys)
 READ_TAGS = [
     "-ExifIFD:DateTimeOriginal",
@@ -43,6 +50,11 @@ READ_TAGS = [
     "-Keys:GPSCoordinates",
     "-QuickTime:GPSCoordinates",
     "-UserData:GPSCoordinates",
+    # exif-heal provenance (read back fine without -config).
+    "-XMP-exifheal:TimeSource",
+    "-XMP-exifheal:TimeConfidence",
+    "-XMP-exifheal:GPSSource",
+    "-XMP-exifheal:GPSConfidence",
 ]
 
 
@@ -55,7 +67,7 @@ def batch_read_directory(
     Runs one exiftool invocation per directory (non-recursive).
     Returns list of raw exiftool JSON dicts, one per file.
     """
-    cmd = [EXIFTOOL, "-j", "-n", "-G1", "-api", "IgnoreMinorErrors=1"]
+    cmd = [EXIFTOOL, *CONFIG_ARGS, "-j", "-n", "-G1", "-api", "IgnoreMinorErrors=1"]
     cmd.extend(READ_TAGS)
     for ext in extensions:
         cmd.extend(["-ext", ext])
@@ -107,7 +119,7 @@ def batch_read_files(
     if not files:
         return []
 
-    cmd = [EXIFTOOL, "-j", "-n", "-G1", "-api", "IgnoreMinorErrors=1"]
+    cmd = [EXIFTOOL, *CONFIG_ARGS, "-j", "-n", "-G1", "-api", "IgnoreMinorErrors=1"]
     cmd.extend(READ_TAGS)
     cmd.extend(str(f) for f in files)
 
@@ -238,7 +250,10 @@ def generate_argfile(
                 if t.get("modify_date"):
                     lines.append(f"-ModifyDate={t['modify_date']}")
                 if xmp_mirror and t.get("datetime_original"):
-                    lines.append(f"-XMP-xmp:DateCreated={t['datetime_original']}")
+                    # XMP-xmp:CreateDate is the writable xmp tag (DateCreated is
+                    # not defined in the xmp namespace); photoshop:DateCreated
+                    # is the other widely-read mirror.
+                    lines.append(f"-XMP-xmp:CreateDate={t['datetime_original']}")
                     lines.append(f"-XMP-photoshop:DateCreated={t['datetime_original']}")
 
         if "gps" in change:
@@ -258,15 +273,18 @@ def generate_argfile(
                     lines.append(f"-XMP-exif:GPSLongitude={g['lon']}")
 
         if tag_provenance and "provenance" in change:
+            # Custom XMP-exifheal namespace (writable only with -config, which
+            # write_via_argfile passes). Stock XMP-xmp:ExifHeal* is "not
+            # defined" and silently dropped.
             p = change["provenance"]
             if p.get("time_source"):
-                lines.append(f"-XMP-xmp:ExifHealTimeSource={p['time_source']}")
+                lines.append(f"-XMP-exifheal:TimeSource={p['time_source']}")
             if p.get("time_confidence"):
-                lines.append(f"-XMP-xmp:ExifHealTimeConfidence={p['time_confidence']}")
+                lines.append(f"-XMP-exifheal:TimeConfidence={p['time_confidence']}")
             if p.get("gps_source"):
-                lines.append(f"-XMP-xmp:ExifHealGPSSource={p['gps_source']}")
+                lines.append(f"-XMP-exifheal:GPSSource={p['gps_source']}")
             if p.get("gps_confidence"):
-                lines.append(f"-XMP-xmp:ExifHealGPSConfidence={p['gps_confidence']}")
+                lines.append(f"-XMP-exifheal:GPSConfidence={p['gps_confidence']}")
 
         lines.append(file_path)
         lines.append("-execute")
@@ -284,19 +302,36 @@ def _change_landed(change: dict, record: dict) -> bool:
     # Lazy import to avoid a circular import at module load time.
     from .scanner import parse_exiftool_datetime
 
+    def time_matches(intended: str, read) -> bool:
+        return parse_exiftool_datetime(read) == parse_exiftool_datetime(intended)
+
     if "time" in change:
-        intended = change["time"].get("datetime_original")
-        if intended:
-            read = get_tag(
-                record, "DateTimeOriginal", ["ExifIFD", "IFD0", "XMP-exif"]
-            )
-            if read is None:
-                # Video: the time was written to QuickTime/Keys, not ExifIFD.
+        t = change["time"]
+        is_video = is_quicktime_video(Path(change["path"]).suffix)
+        if is_video:
+            # capture (DTO/create) -> QuickTime:CreateDate; modify -> ModifyDate
+            capture = t.get("datetime_original") or t.get("create_date")
+            if capture:
                 read = get_tag(record, "CreateDate", ["QuickTime"]) or get_tag(
                     record, "CreationDate", ["Keys"]
                 )
-            if parse_exiftool_datetime(read) != parse_exiftool_datetime(intended):
-                return False
+                if not time_matches(capture, read):
+                    return False
+            if t.get("modify_date"):
+                if not time_matches(t["modify_date"],
+                                    get_tag(record, "ModifyDate", ["QuickTime"])):
+                    return False
+        else:
+            # Verify EVERY intended field, not just datetime_original.
+            checks = [
+                (t.get("datetime_original"), "DateTimeOriginal",
+                 ["ExifIFD", "IFD0", "XMP-exif"]),
+                (t.get("create_date"), "CreateDate", ["ExifIFD", "IFD0", "XMP-xmp"]),
+                (t.get("modify_date"), "ModifyDate", ["IFD0", "ExifIFD"]),
+            ]
+            for intended, tag, groups in checks:
+                if intended and not time_matches(intended, get_tag(record, tag, groups)):
+                    return False
 
     if "gps" in change:
         g = change["gps"]
@@ -305,6 +340,19 @@ def _change_landed(change: dict, record: dict) -> bool:
             return False
         if abs(coords[0] - float(g["lat"])) > 1e-4 or abs(coords[1] - float(g["lon"])) > 1e-4:
             return False
+
+    # Provenance, when present and the config is available to write it.
+    if HAS_CONFIG and "provenance" in change:
+        p = change["provenance"]
+        prov_checks = [
+            (p.get("time_source"), "TimeSource"),
+            (p.get("time_confidence"), "TimeConfidence"),
+            (p.get("gps_source"), "GPSSource"),
+            (p.get("gps_confidence"), "GPSConfidence"),
+        ]
+        for intended, tag in prov_checks:
+            if intended and get_tag(record, tag, ["XMP-exifheal"]) != intended:
+                return False
 
     return True
 
@@ -329,6 +377,7 @@ def write_via_argfile(
     """
     cmd = [
         EXIFTOOL,
+        *CONFIG_ARGS,
         "-overwrite_original_in_place",
         "-P",
         "-@",

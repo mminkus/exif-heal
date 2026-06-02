@@ -226,6 +226,14 @@ def scan(
     all_changes: list[ProposedChange] = []
     change_count = 0
 
+    # Refresh scope: drop stale proposals under this root so a re-scan fully
+    # redefines them (a file no longer needing a change won't linger as
+    # pending). Skipped for --limit runs, which intentionally process a subset.
+    if config.limit is None:
+        cleared = cache.clear_proposals_under_root(str(config.root.resolve()))
+        if cleared:
+            logger.info("Cleared %d stale proposal(s) under root before re-scan", cleared)
+
     # Walk directories
     directories = walk_directories(
         config.root, config.recursive, config.effective_excludes,
@@ -361,6 +369,7 @@ def scan(
                 gps_hints=config.gps_hints,
                 existing_changes=time_changes_by_path,
                 force=config.force,
+                use_mtime=not bulk_copied,
             )
 
         # Merge all changes and deduplicate by path

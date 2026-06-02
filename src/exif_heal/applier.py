@@ -48,6 +48,15 @@ def apply_changes(
     """
     summary = ApplySummary(dry_run=not commit)
 
+    # Provenance tags need the bundled exiftool config to be writable. If it's
+    # missing, disable them loudly rather than emitting tags exiftool drops.
+    if tag_provenance and not exiftool.HAS_CONFIG:
+        logger.warning(
+            "exiftool config not found (%s); provenance tags disabled.",
+            exiftool.CONFIG_PATH,
+        )
+        tag_provenance = False
+
     # Get all pending changes, scoped by root and with freshness check
     pending = cache.get_pending_changes(
         root=str(root.resolve()),

@@ -273,6 +273,36 @@ class TestInferGPS:
         assert forced[0].new_gps is not None
 
 
+class TestBulkCopyGPS:
+    """In a bulk-copied dir (identical mtimes, no real capture time), GPS must
+    NOT be copied based on mtime proximity alone."""
+
+    def _rec(self, name, gps=None, mtime=datetime(2023, 1, 1, 12, 0, 0)):
+        return FileRecord(
+            path=Path(f"/d/{name}"), directory="/d", filename=name,
+            extension="jpg", file_mtime=mtime, file_size=1000, gps=gps,
+        )
+
+    def test_neighbor_skipped_without_mtime(self):
+        donor = self._rec("donor.jpg", gps=GPSCoord(lat=-34.9, lon=138.6))
+        target = self._rec("target.jpg")  # same mtime, no capture time
+        assert find_gps_neighbor(target, [donor, target], 21600, use_mtime=False) is None
+        # use_mtime=True would (wrongly) match on identical mtime
+        assert find_gps_neighbor(target, [donor, target], 21600, use_mtime=True) is donor
+
+    def test_infer_gps_no_bogus_copy_when_bulk(self):
+        donor = self._rec("donor.jpg", gps=GPSCoord(lat=-34.9, lon=138.6))
+        target = self._rec("target.jpg")
+        changes = infer_gps([donor, target], max_time_gap=21600,
+                            max_distance_km=50, use_mtime=False)
+        assert all(c.path.name != "target.jpg" for c in changes)
+        # Confirm the bug WOULD trigger with mtime allowed (HIGH-conf copy).
+        changes2 = infer_gps([donor, target], max_time_gap=21600,
+                             max_distance_km=50, use_mtime=True)
+        bogus = [c for c in changes2 if c.path.name == "target.jpg"]
+        assert bogus and bogus[0].gps_confidence == Confidence.HIGH
+
+
 # --- Helpers ---
 
 def _make_gps_record(

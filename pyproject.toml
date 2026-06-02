@@ -23,6 +23,10 @@ exif-heal = "exif_heal.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Bundle the exiftool config that defines the XMP-exifheal provenance namespace.
+exif_heal = ["exiftool_config"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

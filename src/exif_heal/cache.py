@@ -143,6 +143,32 @@ class MetadataCache:
             (json.dumps(proposed), confidence_time, confidence_gps, path),
         )
 
+    def clear_proposals_under_root(self, root: str) -> int:
+        """Clear stored proposals for files under `root`.
+
+        Called at the start of a (full) scan so a re-scan fully redefines the
+        proposals in its scope — a file that no longer warrants a change loses
+        its stale proposal instead of lingering as pending for apply. Uses the
+        same trailing-slash prefix rule as get_pending_changes to avoid sibling
+        matches (e.g. /foo must not match /foobar).
+        """
+        root_prefix = root if root.endswith("/") else root + "/"
+        rows = self.conn.execute(
+            "SELECT path FROM files WHERE proposed_json IS NOT NULL"
+        ).fetchall()
+        to_clear = [
+            r["path"] for r in rows
+            if r["path"] == root or r["path"].startswith(root_prefix)
+        ]
+        for path in to_clear:
+            self.conn.execute(
+                "UPDATE files SET proposed_json = NULL, confidence_time = NULL, "
+                "confidence_gps = NULL WHERE path = ?",
+                (path,),
+            )
+        self.conn.commit()
+        return len(to_clear)
+
     def get_pending_changes(
         self,
         min_confidence_time: Optional[str] = None,

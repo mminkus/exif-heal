@@ -1,0 +1,25 @@
+# ExifTool config defining the exif-heal provenance XMP namespace.
+# Passed to exiftool via `-config` on writes so the custom XMP-exifheal:* tags
+# are writable. The values persist as standard XMP and read back without this
+# config (exiftool derives the group from the embedded namespace URI).
+%Image::ExifTool::UserDefined = (
+    'Image::ExifTool::XMP::Main' => {
+        exifheal => {
+            SubDirectory => {
+                TagTable => 'Image::ExifTool::UserDefined::exifheal',
+            },
+        },
+    },
+);
+
+%Image::ExifTool::UserDefined::exifheal = (
+    GROUPS    => { 0 => 'XMP', 1 => 'XMP-exifheal', 2 => 'Image' },
+    NAMESPACE => { 'exifheal' => 'http://exif-heal/ns/1.0/' },
+    WRITABLE  => 'string',
+    TimeSource     => { },
+    TimeConfidence => { },
+    GPSSource      => { },
+    GPSConfidence  => { },
+);
+
+1;  # exiftool config files must return a true value

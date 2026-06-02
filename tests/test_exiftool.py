@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from exif_heal.exiftool import (
+    _change_landed,
     batch_read_directory,
     batch_read_files,
     generate_argfile,
@@ -154,8 +155,8 @@ class TestGenerateArgfile:
             },
         }]
         content = generate_argfile(changes, tag_provenance=True, xmp_mirror=False)
-        assert "ExifHealTimeSource=neighbor_interp" in content
-        assert "ExifHealTimeConfidence=high" in content
+        assert "-XMP-exifheal:TimeSource=neighbor_interp" in content
+        assert "-XMP-exifheal:TimeConfidence=high" in content
 
     def test_with_xmp_mirror(self):
         changes = [{
@@ -164,7 +165,7 @@ class TestGenerateArgfile:
             "gps": {"lat": -34.5, "lon": 138.5},
         }]
         content = generate_argfile(changes, tag_provenance=False, xmp_mirror=True)
-        assert "XMP-xmp:DateCreated=" in content
+        assert "XMP-xmp:CreateDate=" in content
         assert "XMP-photoshop:DateCreated=" in content
         assert "XMP-exif:GPSLatitude=" in content
 
@@ -198,6 +199,58 @@ class TestGenerateArgfile:
         assert "-DateTimeOriginal=" not in content
         assert "-GPSLatitude" not in content
         assert "XMP-exif:GPSLatitude" not in content
+
+
+class TestChangeLanded:
+    """Verification must check EVERY intended field, not just datetime_original."""
+
+    def test_create_date_only_missing_is_not_landed(self):
+        # Codex repro: previously returned True because only DTO was checked.
+        assert _change_landed(
+            {"path": "x.jpg", "time": {"create_date": "2019:05:20 14:30:00"}}, {}
+        ) is False
+
+    def test_modify_date_only_missing_is_not_landed(self):
+        assert _change_landed(
+            {"path": "x.jpg", "time": {"modify_date": "2019:05:20 14:30:00"}}, {}
+        ) is False
+
+    def test_all_time_fields_present_and_matching(self):
+        rec = {
+            "ExifIFD:DateTimeOriginal": "2019:05:20 14:30:00",
+            "ExifIFD:CreateDate": "2019:05:20 14:30:00",
+            "IFD0:ModifyDate": "2019:05:20 14:30:00",
+        }
+        change = {"path": "x.jpg", "time": {
+            "datetime_original": "2019:05:20 14:30:00",
+            "create_date": "2019:05:20 14:30:00",
+            "modify_date": "2019:05:20 14:30:00"}}
+        assert _change_landed(change, rec) is True
+
+    def test_dto_ok_but_create_date_wrong_is_not_landed(self):
+        rec = {
+            "ExifIFD:DateTimeOriginal": "2019:05:20 14:30:00",
+            "ExifIFD:CreateDate": "2000:01:01 00:00:00",  # didn't land
+        }
+        change = {"path": "x.jpg", "time": {
+            "datetime_original": "2019:05:20 14:30:00",
+            "create_date": "2019:05:20 14:30:00"}}
+        assert _change_landed(change, rec) is False
+
+    def test_video_create_date_verified_against_quicktime(self):
+        rec = {"QuickTime:CreateDate": "2019:05:20 14:30:00"}
+        change = {"path": "clip.mp4", "time": {"create_date": "2019:05:20 14:30:00"}}
+        assert _change_landed(change, rec) is True
+        bad = {"path": "clip.mp4", "time": {"create_date": "2020:01:01 00:00:00"}}
+        assert _change_landed(bad, rec) is False
+
+    def test_provenance_verified_when_config_available(self):
+        import exif_heal.exiftool as et
+        if not et.HAS_CONFIG:
+            pytest.skip("exiftool config not present")
+        change = {"path": "x.jpg", "provenance": {"time_source": "neighbor_interp"}}
+        assert _change_landed(change, {"XMP-exifheal:TimeSource": "neighbor_interp"}) is True
+        assert _change_landed(change, {}) is False
 
 
 class TestWriteViaArgfileVerification:

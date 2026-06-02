@@ -237,3 +237,26 @@ class TestMetadataCache:
         assert "/photos/Albums/a.jpg" in paths
         assert "/photos/Albums/sub/c.jpg" in paths
         assert "/photos/Albums2/b.jpg" not in paths
+
+    def test_clear_proposals_under_root(self, cache_db):
+        """Re-scan should be able to drop stale proposals within its scope only,
+        without touching siblings or other roots."""
+        for name, directory in [
+            ("a.jpg", "/photos/Albums"),
+            ("c.jpg", "/photos/Albums/sub"),
+            ("b.jpg", "/photos/Albums2"),   # sibling prefix, must survive
+            ("d.jpg", "/other"),            # different root, must survive
+        ]:
+            path = f"{directory}/{name}"
+            cache_db.upsert_file(path=path, directory=directory, filename=name,
+                                 extension="jpg", mtime=1.0, size=1, metadata={})
+            cache_db.set_proposed_change(path, {"path": path}, "med", None)
+        cache_db.commit()
+
+        cleared = cache_db.clear_proposals_under_root("/photos/Albums")
+        assert cleared == 2  # a.jpg + sub/c.jpg only
+
+        remaining = {
+            p["path"] for p in cache_db.get_pending_changes(check_freshness=False)
+        }
+        assert remaining == {"/photos/Albums2/b.jpg", "/other/d.jpg"}

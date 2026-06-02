@@ -39,7 +39,6 @@ def apply_changes(
     min_confidence_gps: Confidence = Confidence.MED,
     tag_provenance: bool = True,
     xmp_mirror: bool = True,
-    write_xmp_sidecar: bool = False,
     limit: Optional[int] = None,
 ) -> ApplySummary:
     """Apply proposed changes from the cache.
@@ -177,9 +176,8 @@ def apply_changes(
 
     try:
         print(f"\nRunning exiftool with {len(eligible)} file(s)...")
-        expected_paths = [change["path"] for change in eligible]
         successfully_written, errors, stderr = exiftool.write_via_argfile(
-            argfile_path, expected_paths
+            argfile_path, eligible
         )
         summary.written = len(successfully_written)
         summary.errors = errors

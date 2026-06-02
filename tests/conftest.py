@@ -113,7 +113,9 @@ def create_jpeg(tmp_dir):
                 cmd.extend([f"-DateTimeOriginal={datetime_original}"])
                 cmd.extend([f"-CreateDate={datetime_original}"])
             if gps_lat is not None and gps_lon is not None:
-                cmd.extend([f"-GPSLatitude={gps_lat}", f"-GPSLongitude={gps_lon}"])
+                # "*" suffix writes the hemisphere Ref tags too, so signed
+                # (southern/western) coordinates round-trip correctly.
+                cmd.extend([f"-GPSLatitude*={gps_lat}", f"-GPSLongitude*={gps_lon}"])
             if make:
                 cmd.extend([f"-Make={make}"])
             if model:
@@ -127,6 +129,63 @@ def create_jpeg(tmp_dir):
             os.utime(str(filepath), (ts, ts))
 
         created_files.append(filepath)
+        return filepath
+
+    return _create
+
+
+def has_ffmpeg() -> bool:
+    """Check if ffmpeg is available (used to synthesize tiny test videos)."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"], capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+@pytest.fixture
+def create_video(tmp_dir):
+    """Factory fixture to create tiny QuickTime-family videos with metadata.
+
+    Requires ffmpeg + exiftool; tests using this should skip when absent.
+    """
+    def _create(
+        name: str = "test.mp4",
+        subdir: str = "",
+        create_date: str | None = None,
+        gps_lat: float | None = None,
+        gps_lon: float | None = None,
+        mtime: datetime | None = None,
+    ) -> Path:
+        target_dir = tmp_dir / subdir if subdir else tmp_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filepath = target_dir / name
+
+        subprocess.run(
+            ["ffmpeg", "-f", "lavfi", "-i", "color=c=blue:s=32x32:d=1",
+             "-pix_fmt", "yuv420p", str(filepath), "-y"],
+            capture_output=True, timeout=30,
+        )
+
+        if has_exiftool() and (create_date or gps_lat is not None):
+            cmd = ["exiftool", "-overwrite_original"]
+            if create_date:
+                cmd.extend([
+                    f"-QuickTime:CreateDate={create_date}",
+                    f"-TrackCreateDate={create_date}",
+                    f"-MediaCreateDate={create_date}",
+                ])
+            if gps_lat is not None and gps_lon is not None:
+                cmd.append(f"-Keys:GPSCoordinates={gps_lat} {gps_lon}")
+            cmd.append(str(filepath))
+            subprocess.run(cmd, capture_output=True, timeout=10)
+
+        if mtime:
+            ts = mtime.timestamp()
+            os.utime(str(filepath), (ts, ts))
+
         return filepath
 
     return _create

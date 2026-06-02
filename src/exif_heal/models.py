@@ -9,6 +9,18 @@ from pathlib import Path
 from typing import Optional
 
 
+# Video containers in the ISO Base Media / QuickTime family, whose metadata
+# exiftool exposes under the QuickTime/Keys/UserData groups. Other video
+# formats (AVI=RIFF, MKV=Matroska, WMV=ASF, MTS=AVCHD) use different tag
+# families and are NOT handled by the QuickTime read/write paths.
+QUICKTIME_VIDEO_EXTENSIONS = frozenset({"mp4", "mov", "m4v", "3gp", "3g2", "qt"})
+
+
+def is_quicktime_video(extension: str) -> bool:
+    """True if the (lowercase, dotless) extension is a QuickTime-family video."""
+    return extension.lstrip(".").lower() in QUICKTIME_VIDEO_EXTENSIONS
+
+
 class Confidence(Enum):
     """Confidence level for an inferred value."""
 
@@ -107,8 +119,17 @@ class FileRecord:
     filename_time_has_time: bool = False  # True if filename had H:M:S
 
     @property
+    def is_video(self) -> bool:
+        """Whether this is a QuickTime-family video (mp4/mov/etc)."""
+        return is_quicktime_video(self.extension)
+
+    @property
     def has_exif_time(self) -> bool:
-        """Whether any EXIF time tag is present."""
+        """Whether any embedded time tag is present.
+
+        For videos this reflects QuickTime/Keys dates, which
+        ``record_from_exiftool`` maps onto these same fields.
+        """
         return any([self.datetime_original, self.create_date, self.modify_date])
 
     @property
@@ -186,7 +207,6 @@ class ScanConfig:
     only_missing_time: bool = False
     only_missing_gps: bool = False
     limit: Optional[int] = None
-    timezone: Optional[str] = None
     allow_jumps: bool = False
     allow_low_confidence: bool = False
     min_confidence_time: Confidence = Confidence.MED
@@ -196,7 +216,6 @@ class ScanConfig:
     gps_hints: list[GPSHint] = field(default_factory=list)
     exclude_globs: list[str] = field(default_factory=list)
     no_default_excludes: bool = False
-    write_xmp_sidecar: bool = False
     no_tag_provenance: bool = False
     no_xmp_mirror: bool = False
 

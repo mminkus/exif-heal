@@ -5,6 +5,9 @@ from __future__ import annotations
 import fnmatch
 import logging
 import os
+import re
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, TextIO
@@ -21,6 +24,7 @@ from .models import (
     ScanConfig,
     ScanSummary,
     TimeSource,
+    is_quicktime_video,
 )
 from .report import print_plan_table, print_summary, write_report_line
 from .time_infer import (
@@ -32,33 +36,39 @@ from .time_infer import (
 logger = logging.getLogger(__name__)
 
 
-def parse_exiftool_datetime(value) -> Optional[datetime]:
-    """Parse an exiftool datetime string to a Python datetime.
+# Matches "YYYY:MM:DD" or "YYYY-MM-DD", optionally followed by a space- or
+# T-separated "HH:MM:SS". Any trailing timezone offset (+HH:MM, -HH:MM, -0800,
+# Z) or fractional seconds is left unmatched and thus discarded.
+_DATETIME_RE = re.compile(
+    r"(\d{4})[:-](\d{2})[:-](\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2}))?"
+)
 
-    Handles formats like "2019:01:21 20:34:43" and "2019:01:21 20:34:43+00:00".
-    Returns naive datetime (strips timezone).
+
+def parse_exiftool_datetime(value) -> Optional[datetime]:
+    """Parse an exiftool datetime string to a naive Python datetime.
+
+    Handles "2019:01:21 20:34:43", dash-separated dates, "T" separators, and
+    discards any trailing timezone offset (positive OR negative, colon- or
+    digit-style) and fractional seconds. Returns None if unparseable.
     """
     if value is None or value == "" or value == "0000:00:00 00:00:00":
         return None
 
-    s = str(value)
-    # Strip timezone suffix if present
-    if "+" in s and s.index("+") > 10:
-        s = s[: s.index("+")]
-    elif s.count("-") > 2:
-        # Handle "2019:01:21 20:34:43-08:00" style
-        parts = s.rsplit("-", 1)
-        if len(parts) == 2 and ":" in parts[1] and len(parts[1]) <= 6:
-            s = parts[0]
+    m = _DATETIME_RE.match(str(value).strip())
+    if not m:
+        logger.debug("Could not parse datetime: %r", value)
+        return None
 
-    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%d"):
-        try:
-            return datetime.strptime(s.strip(), fmt)
-        except ValueError:
-            continue
+    year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    hour = int(m.group(4)) if m.group(4) else 0
+    minute = int(m.group(5)) if m.group(5) else 0
+    second = int(m.group(6)) if m.group(6) else 0
 
-    logger.debug("Could not parse datetime: %r", value)
-    return None
+    try:
+        return datetime(year, month, day, hour, minute, second)
+    except ValueError:
+        logger.debug("Invalid datetime components in %r", value)
+        return None
 
 
 def record_from_exiftool(raw: dict) -> FileRecord:
@@ -96,15 +106,31 @@ def record_from_exiftool(raw: dict) -> FileRecord:
         exiftool.get_tag(raw, "DateCreated", ["XMP-xmp", "XMP-photoshop"])
     )
 
-    # Parse GPS
+    # Video (QuickTime-family): dates live under QuickTime/Keys, not ExifIFD.
+    # Map them onto datetime_original/create_date/modify_date so the rest of
+    # the capture-time hierarchy and inference works unchanged. Prefer the
+    # iOS Keys:CreationDate (carries an offset) over QuickTime:CreateDate.
+    extension = path.suffix.lstrip(".").lower()
+    if is_quicktime_video(extension) and not any([dto, create, modify]):
+        qt_create = parse_exiftool_datetime(
+            exiftool.get_tag(raw, "CreationDate", ["Keys"])
+        ) or parse_exiftool_datetime(
+            exiftool.get_tag(raw, "CreateDate", ["QuickTime"])
+        )
+        qt_modify = parse_exiftool_datetime(
+            exiftool.get_tag(raw, "ModifyDate", ["QuickTime"])
+        )
+        if qt_create:
+            dto = qt_create
+            create = qt_create
+        if qt_modify:
+            modify = qt_modify
+
+    # Parse GPS (signed — handles southern/western hemisphere via Composite/Ref)
     gps = None
-    lat = exiftool.get_tag(raw, "GPSLatitude", ["GPS", "Composite", "XMP-exif"])
-    lon = exiftool.get_tag(raw, "GPSLongitude", ["GPS", "Composite", "XMP-exif"])
-    if lat is not None and lon is not None:
-        try:
-            gps = GPSCoord(lat=float(lat), lon=float(lon))
-        except (ValueError, TypeError):
-            pass
+    coords = exiftool.read_gps(raw)
+    if coords is not None:
+        gps = GPSCoord(lat=coords[0], lon=coords[1])
 
     # Camera info
     make = exiftool.get_tag(raw, "Make", ["IFD0"])
@@ -114,7 +140,7 @@ def record_from_exiftool(raw: dict) -> FileRecord:
         path=path,
         directory=str(path.parent),
         filename=path.name,
-        extension=path.suffix.lstrip(".").lower(),
+        extension=extension,
         file_mtime=file_mtime,
         file_size=int(file_size),
         datetime_original=dto,
@@ -164,16 +190,36 @@ def walk_directories(
     return dirs
 
 
+def resolve_jobs(jobs: Optional[int], num_dirs: int) -> int:
+    """Resolve the worker count for parallel directory reads.
+
+    jobs=None or <=0 means auto-detect (os.cpu_count()). Capped at the number
+    of directories (no point spawning more workers than there is work).
+    """
+    if jobs and jobs > 0:
+        workers = jobs
+    else:
+        workers = os.cpu_count() or 4
+    if num_dirs <= 0:
+        return 1
+    return max(1, min(workers, num_dirs))
+
+
 def scan(
     config: ScanConfig,
     cache: MetadataCache,
     report_file: TextIO,
     print_plan: bool = False,
+    jobs: Optional[int] = None,
 ) -> ScanSummary:
     """Main scan pipeline.
 
     Walks directories, reads metadata, infers timestamps and GPS,
     applies guardrails, writes proposed changes to cache and JSONL.
+
+    The per-directory exiftool reads run concurrently across `jobs` workers
+    (auto = CPU count); inference and all cache/report writes stay serial in
+    this thread, so output is identical regardless of worker count.
     """
     summary = ScanSummary()
     run_id = cache.start_scan_run(str(config.root))
@@ -185,12 +231,37 @@ def scan(
         config.root, config.recursive, config.effective_excludes,
     )
 
-    for directory in directories:
+    workers = resolve_jobs(jobs, len(directories))
+    logger.info("Scanning %d directories with %d worker(s)", len(directories), workers)
+
+    def _read(directory: Path) -> tuple[Path, list[dict]]:
+        return directory, exiftool.batch_read_directory(directory, config.extensions)
+
+    # Parallel read with a bounded sliding window: keep ~workers reads in
+    # flight, consume results in directory order. On early --limit exit,
+    # cancel_futures avoids reading the rest of the library.
+    executor = ThreadPoolExecutor(max_workers=workers)
+    dir_iter = iter(directories)
+    inflight: deque = deque()
+    for _ in range(workers + 1):
+        try:
+            inflight.append(executor.submit(_read, next(dir_iter)))
+        except StopIteration:
+            break
+
+    limit_hit = False
+    try:
+      while inflight:
+        directory, raw_records = inflight.popleft().result()
+        # Refill the window before processing so workers stay busy.
+        try:
+            inflight.append(executor.submit(_read, next(dir_iter)))
+        except StopIteration:
+            pass
+
         summary.dirs_scanned += 1
         logger.info("Scanning %s", directory)
 
-        # Read metadata via exiftool (batch JSON)
-        raw_records = exiftool.batch_read_directory(directory, config.extensions)
         if not raw_records:
             continue
 
@@ -362,6 +433,10 @@ def scan(
         if limit_hit:
             logger.info("Reached limit of %d changes", config.limit)
             break
+    finally:
+        # Stop reading the rest of the library on early exit; wait for any
+        # in-flight exiftool reads to finish cleanly.
+        executor.shutdown(wait=True, cancel_futures=True)
 
     # Finalize
     cache.finish_scan_run(

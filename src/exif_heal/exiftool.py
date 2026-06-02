@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from .models import is_quicktime_video
+
 logger = logging.getLogger(__name__)
 
 EXIFTOOL = "exiftool"
@@ -19,6 +21,12 @@ READ_TAGS = [
     "-IFD0:ModifyDate",
     "-GPS:GPSLatitude",
     "-GPS:GPSLongitude",
+    "-GPS:GPSLatitudeRef",
+    "-GPS:GPSLongitudeRef",
+    # Composite gives the SIGNED decimal coordinate (negative for S/W);
+    # the raw GPS:GPSLatitude is only the unsigned magnitude.
+    "-Composite:GPSLatitude",
+    "-Composite:GPSLongitude",
     "-XMP-xmp:DateCreated",
     "-System:FileModifyDate",
     "-System:FileName",
@@ -27,6 +35,14 @@ READ_TAGS = [
     "-File:FileSize",
     "-IFD0:Make",
     "-IFD0:Model",
+    # Video (QuickTime-family) time + GPS. The base GPSCoordinates tags are
+    # requested so exiftool can derive the signed Composite:GPSLatitude/Longitude.
+    "-QuickTime:CreateDate",
+    "-QuickTime:ModifyDate",
+    "-Keys:CreationDate",
+    "-Keys:GPSCoordinates",
+    "-QuickTime:GPSCoordinates",
+    "-UserData:GPSCoordinates",
 ]
 
 
@@ -141,6 +157,44 @@ def get_tag(record: dict, tag_name: str, groups: Optional[list[str]] = None) -> 
     return None
 
 
+def read_gps(record: dict) -> Optional[tuple[float, float]]:
+    """Read a SIGNED (lat, lon) pair from an exiftool record.
+
+    exiftool's raw ``GPS:GPSLatitude`` (with ``-n``) is the *unsigned*
+    magnitude; the sign lives in ``GPSLatitudeRef`` (N/S) and
+    ``GPSLongitudeRef`` (E/W). ``Composite:GPSLatitude`` already folds the
+    ref into a signed decimal, so prefer it and fall back to magnitude+ref.
+
+    Returns None if no usable coordinate is present.
+    """
+    # Preferred: Composite is already signed.
+    lat = get_tag(record, "GPSLatitude", ["Composite"])
+    lon = get_tag(record, "GPSLongitude", ["Composite"])
+    if lat is not None and lon is not None:
+        try:
+            return float(lat), float(lon)
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback: magnitude + hemisphere ref.
+    lat = get_tag(record, "GPSLatitude", ["GPS", "XMP-exif"])
+    lon = get_tag(record, "GPSLongitude", ["GPS", "XMP-exif"])
+    if lat is None or lon is None:
+        return None
+    try:
+        flat, flon = float(lat), float(lon)
+    except (ValueError, TypeError):
+        return None
+
+    lat_ref = get_tag(record, "GPSLatitudeRef", ["GPS"])
+    lon_ref = get_tag(record, "GPSLongitudeRef", ["GPS"])
+    if lat_ref and str(lat_ref).strip().upper().startswith("S"):
+        flat = -abs(flat)
+    if lon_ref and str(lon_ref).strip().upper().startswith("W"):
+        flon = -abs(flon)
+    return flat, flon
+
+
 def generate_argfile(
     changes: list[dict],
     tag_provenance: bool = True,
@@ -159,27 +213,49 @@ def generate_argfile(
     lines = []
     for change in changes:
         file_path = change["path"]
+        is_video = is_quicktime_video(Path(file_path).suffix)
 
         if "time" in change:
             t = change["time"]
-            if t.get("datetime_original"):
-                lines.append(f"-DateTimeOriginal={t['datetime_original']}")
-            if t.get("create_date"):
-                lines.append(f"-CreateDate={t['create_date']}")
-            if t.get("modify_date"):
-                lines.append(f"-ModifyDate={t['modify_date']}")
-            if xmp_mirror:
+            if is_video:
+                # QuickTime container: dates live under QuickTime/Track/Media,
+                # not ExifIFD. Map our capture time onto the create-style tags
+                # and modify time onto the modify-style tags.
+                capture = t.get("datetime_original") or t.get("create_date")
+                if capture:
+                    for tag in ("QuickTime:CreateDate", "TrackCreateDate",
+                                "MediaCreateDate"):
+                        lines.append(f"-{tag}={capture}")
+                if t.get("modify_date"):
+                    for tag in ("QuickTime:ModifyDate", "TrackModifyDate",
+                                "MediaModifyDate"):
+                        lines.append(f"-{tag}={t['modify_date']}")
+            else:
                 if t.get("datetime_original"):
+                    lines.append(f"-DateTimeOriginal={t['datetime_original']}")
+                if t.get("create_date"):
+                    lines.append(f"-CreateDate={t['create_date']}")
+                if t.get("modify_date"):
+                    lines.append(f"-ModifyDate={t['modify_date']}")
+                if xmp_mirror and t.get("datetime_original"):
                     lines.append(f"-XMP-xmp:DateCreated={t['datetime_original']}")
                     lines.append(f"-XMP-photoshop:DateCreated={t['datetime_original']}")
 
         if "gps" in change:
             g = change["gps"]
-            lines.append(f"-GPSLatitude={g['lat']}")
-            lines.append(f"-GPSLongitude={g['lon']}")
-            if xmp_mirror:
-                lines.append(f"-XMP-exif:GPSLatitude={g['lat']}")
-                lines.append(f"-XMP-exif:GPSLongitude={g['lon']}")
+            if is_video:
+                # QuickTime stores GPS as an ISO-6709-ish "lat lon" string;
+                # exiftool derives the signed Composite:GPSLatitude from it.
+                lines.append(f"-Keys:GPSCoordinates={g['lat']} {g['lon']}")
+            else:
+                # The "*" suffix tells exiftool to also write the matching
+                # GPSLatitudeRef/GPSLongitudeRef. Without it, a signed decimal
+                # is stored as an unsigned magnitude and the hemisphere is lost.
+                lines.append(f"-GPSLatitude*={g['lat']}")
+                lines.append(f"-GPSLongitude*={g['lon']}")
+                if xmp_mirror:
+                    lines.append(f"-XMP-exif:GPSLatitude={g['lat']}")
+                    lines.append(f"-XMP-exif:GPSLongitude={g['lon']}")
 
         if tag_provenance and "provenance" in change:
             p = change["provenance"]
@@ -198,16 +274,58 @@ def generate_argfile(
     return "\n".join(lines)
 
 
+def _change_landed(change: dict, record: dict) -> bool:
+    """Check whether the intended values in `change` are present in `record`.
+
+    Compares the re-read tags against what we meant to write. A change counts
+    as landed only if every intended component (time and/or GPS) is present and
+    matches.
+    """
+    # Lazy import to avoid a circular import at module load time.
+    from .scanner import parse_exiftool_datetime
+
+    if "time" in change:
+        intended = change["time"].get("datetime_original")
+        if intended:
+            read = get_tag(
+                record, "DateTimeOriginal", ["ExifIFD", "IFD0", "XMP-exif"]
+            )
+            if read is None:
+                # Video: the time was written to QuickTime/Keys, not ExifIFD.
+                read = get_tag(record, "CreateDate", ["QuickTime"]) or get_tag(
+                    record, "CreationDate", ["Keys"]
+                )
+            if parse_exiftool_datetime(read) != parse_exiftool_datetime(intended):
+                return False
+
+    if "gps" in change:
+        g = change["gps"]
+        coords = read_gps(record)
+        if coords is None:
+            return False
+        if abs(coords[0] - float(g["lat"])) > 1e-4 or abs(coords[1] - float(g["lon"])) > 1e-4:
+            return False
+
+    return True
+
+
 def write_via_argfile(
     argfile_path: Path,
-    expected_paths: list[str],
+    expected_changes: list[dict],
 ) -> tuple[list[str], int, str]:
-    """Execute exiftool write using an argfile.
+    """Execute an exiftool write using an argfile, then VERIFY by re-reading.
 
     Runs: exiftool -overwrite_original_in_place -P -@ <argfile>
 
-    Returns (successfully_written_paths, error_count, stderr_output).
-    The successfully_written_paths list contains paths that were updated.
+    Success is determined by re-reading each file and confirming the intended
+    time/GPS values actually landed — NOT by parsing exiftool's stdout counts.
+    The stdout counts are unreliable: "Nothing to do." is emitted on stderr,
+    and the per-batch lines can desync from file order, so a no-op batch would
+    otherwise cause the wrong file to be marked applied.
+
+    `expected_changes` is the list of change dicts (each with "path" and
+    optional "time"/"gps"). Returns (successfully_written_paths, error_count,
+    stderr_output).
     """
     cmd = [
         EXIFTOOL,
@@ -228,43 +346,25 @@ def write_via_argfile(
         raise RuntimeError("exiftool not found.")
     except subprocess.TimeoutExpired:
         logger.error("exiftool timed out during write")
-        return [], 0, "timeout"
+        return [], len(expected_changes), "timeout"
 
     stderr = result.stderr or ""
-    stdout = result.stdout or ""
 
-    # Parse output to track which -execute batches succeeded.
-    # Each file is in its own -execute batch, so we can map results 1:1.
-    #
-    # Per-batch output is one of:
-    #   "N image files updated"   → success if N > 0, failure if N == 0
-    #   "Nothing to do."          → no valid tags, counts as failure
-    #
-    # A summary line "N files weren't updated due to errors" may also appear
-    # but is NOT a per-batch result and must be excluded from batch tracking.
-    success_per_batch = []
-    total_errors = 0
-    for line in stdout.split("\n"):
-        line = line.strip()
-        lower = line.lower()
-        if "files weren't updated due to errors" in lower:
-            try:
-                total_errors = int(line.split()[0])
-            except (ValueError, IndexError):
-                pass
-        elif "image files updated" in lower:
-            try:
-                count = int(line.split()[0])
-                success_per_batch.append(count > 0)
-            except (ValueError, IndexError):
-                pass
-        elif lower == "nothing to do.":
-            success_per_batch.append(False)
+    # Verify by re-reading the files and comparing against intended values.
+    paths = [c["path"] for c in expected_changes]
+    records = batch_read_files([Path(p) for p in paths])
+    by_source: dict[str, dict] = {}
+    for rec in records:
+        source = rec.get("SourceFile")
+        if source is not None:
+            by_source[str(Path(source).resolve())] = rec
 
-    # Map success flags back to file paths
     successfully_written = []
-    for idx, path in enumerate(expected_paths):
-        if idx < len(success_per_batch) and success_per_batch[idx]:
+    for change in expected_changes:
+        path = change["path"]
+        rec = by_source.get(str(Path(path).resolve()))
+        if rec is not None and _change_landed(change, rec):
             successfully_written.append(path)
 
-    return successfully_written, total_errors, stderr
+    error_count = len(expected_changes) - len(successfully_written)
+    return successfully_written, error_count, stderr

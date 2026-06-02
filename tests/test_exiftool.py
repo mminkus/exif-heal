@@ -12,6 +12,7 @@ from exif_heal.exiftool import (
     batch_read_files,
     generate_argfile,
     get_tag,
+    read_gps,
     write_via_argfile,
 )
 
@@ -137,8 +138,9 @@ class TestGenerateArgfile:
             "gps": {"lat": -34.5, "lon": 138.5},
         }]
         content = generate_argfile(changes, tag_provenance=False, xmp_mirror=False)
-        assert "-GPSLatitude=-34.5" in content
-        assert "-GPSLongitude=138.5" in content
+        # "*" suffix ensures exiftool also writes the hemisphere Ref tags.
+        assert "-GPSLatitude*=-34.5" in content
+        assert "-GPSLongitude*=138.5" in content
 
     def test_with_provenance(self):
         changes = [{
@@ -176,82 +178,112 @@ class TestGenerateArgfile:
         assert "/test/a.jpg" in content
         assert "/test/b.jpg" in content
 
+    def test_video_uses_quicktime_tags(self):
+        """Video changes must write QuickTime/Keys tags, not ExifIFD/EXIF GPS."""
+        changes = [{
+            "path": "/test/clip.mp4",
+            "time": {"datetime_original": "2019:05:20 14:30:00",
+                     "create_date": "2019:05:20 14:30:00",
+                     "modify_date": "2019:05:20 14:30:00"},
+            "gps": {"lat": -34.93, "lon": 138.61},
+        }]
+        content = generate_argfile(changes, tag_provenance=False, xmp_mirror=True)
+        # QuickTime time tags
+        assert "-QuickTime:CreateDate=2019:05:20 14:30:00" in content
+        assert "-TrackCreateDate=2019:05:20 14:30:00" in content
+        assert "-QuickTime:ModifyDate=2019:05:20 14:30:00" in content
+        # QuickTime GPS as a coordinate string
+        assert "-Keys:GPSCoordinates=-34.93 138.61" in content
+        # Must NOT emit photo-only tags for a video
+        assert "-DateTimeOriginal=" not in content
+        assert "-GPSLatitude" not in content
+        assert "XMP-exif:GPSLatitude" not in content
 
-class TestWriteViaArgfileOutputParsing:
-    """Unit tests for write_via_argfile output parsing (no exiftool needed)."""
 
-    def test_all_updated(self, tmp_dir):
-        """All files report '1 image files updated'."""
+class TestWriteViaArgfileVerification:
+    """Unit tests for write_via_argfile success verification (no exiftool needed).
+
+    Success is decided by re-reading each file and confirming the intended
+    values landed, so these tests mock both the exiftool run and the re-read.
+    """
+
+    def _run(self, tmp_dir, expected_changes, read_records):
         from unittest.mock import patch, MagicMock
 
         mock_result = MagicMock()
-        mock_result.stdout = "1 image files updated\n1 image files updated\n"
+        mock_result.stdout = ""
         mock_result.stderr = ""
 
         argfile = tmp_dir / "args.txt"
-        argfile.write_text("-DateTimeOriginal=2020:01:01 10:00:00\n/test/a.jpg\n-execute\n"
-                           "-DateTimeOriginal=2020:01:01 11:00:00\n/test/b.jpg\n-execute\n")
+        argfile.write_text("dummy")
 
-        with patch("exif_heal.exiftool.subprocess.run", return_value=mock_result):
-            written, errors, stderr = write_via_argfile(
-                argfile, ["/test/a.jpg", "/test/b.jpg"],
-            )
+        with patch("exif_heal.exiftool.subprocess.run", return_value=mock_result), \
+             patch("exif_heal.exiftool.batch_read_files", return_value=read_records):
+            return write_via_argfile(argfile, expected_changes)
+
+    def test_all_landed(self, tmp_dir):
+        changes = [
+            {"path": "/test/a.jpg", "time": {"datetime_original": "2020:01:01 10:00:00"}},
+            {"path": "/test/b.jpg", "time": {"datetime_original": "2020:01:01 11:00:00"}},
+        ]
+        records = [
+            {"SourceFile": "/test/a.jpg", "ExifIFD:DateTimeOriginal": "2020:01:01 10:00:00"},
+            {"SourceFile": "/test/b.jpg", "ExifIFD:DateTimeOriginal": "2020:01:01 11:00:00"},
+        ]
+        written, errors, _ = self._run(tmp_dir, changes, records)
         assert written == ["/test/a.jpg", "/test/b.jpg"]
         assert errors == 0
 
-    def test_nothing_to_do_skips_file(self, tmp_dir):
-        """'Nothing to do.' lines should be tracked as failed batches."""
-        from unittest.mock import patch, MagicMock
-
-        mock_result = MagicMock()
-        mock_result.stdout = "1 image files updated\nNothing to do.\n1 image files updated\n"
-        mock_result.stderr = ""
-
-        argfile = tmp_dir / "args.txt"
-        argfile.write_text("dummy")
-
-        with patch("exif_heal.exiftool.subprocess.run", return_value=mock_result):
-            written, errors, stderr = write_via_argfile(
-                argfile, ["/test/a.jpg", "/test/b.jpg", "/test/c.jpg"],
-            )
-        # b.jpg had "Nothing to do." so only a.jpg and c.jpg succeed
+    def test_noop_file_not_marked(self, tmp_dir):
+        """A file whose intended value did NOT land is not marked written,
+        and crucially does not desync the mapping for the others."""
+        changes = [
+            {"path": "/test/a.jpg", "time": {"datetime_original": "2020:01:01 10:00:00"}},
+            {"path": "/test/b.jpg", "time": {"datetime_original": "2020:01:01 11:00:00"}},
+            {"path": "/test/c.jpg", "time": {"datetime_original": "2020:01:01 12:00:00"}},
+        ]
+        records = [
+            {"SourceFile": "/test/a.jpg", "ExifIFD:DateTimeOriginal": "2020:01:01 10:00:00"},
+            # b.jpg unchanged (still missing the tag) -> not written
+            {"SourceFile": "/test/b.jpg"},
+            {"SourceFile": "/test/c.jpg", "ExifIFD:DateTimeOriginal": "2020:01:01 12:00:00"},
+        ]
+        written, errors, _ = self._run(tmp_dir, changes, records)
         assert written == ["/test/a.jpg", "/test/c.jpg"]
-
-    def test_error_count_parsed(self, tmp_dir):
-        """Error summary line is parsed for total count."""
-        from unittest.mock import patch, MagicMock
-
-        mock_result = MagicMock()
-        mock_result.stdout = "1 image files updated\n1 files weren't updated due to errors\n"
-        mock_result.stderr = ""
-
-        argfile = tmp_dir / "args.txt"
-        argfile.write_text("dummy")
-
-        with patch("exif_heal.exiftool.subprocess.run", return_value=mock_result):
-            written, errors, stderr = write_via_argfile(
-                argfile, ["/test/a.jpg"],
-            )
-        assert written == ["/test/a.jpg"]
         assert errors == 1
 
-    def test_fewer_batches_than_expected(self, tmp_dir):
-        """If exiftool produces fewer output lines than files, extras are not marked."""
-        from unittest.mock import patch, MagicMock
+    def test_missing_readback_not_marked(self, tmp_dir):
+        """A file absent from the re-read is treated as failed."""
+        changes = [{"path": "/test/a.jpg", "time": {"datetime_original": "2020:01:01 10:00:00"}}]
+        written, errors, _ = self._run(tmp_dir, changes, [])
+        assert written == []
+        assert errors == 1
 
-        mock_result = MagicMock()
-        mock_result.stdout = "1 image files updated\n"
-        mock_result.stderr = ""
-
-        argfile = tmp_dir / "args.txt"
-        argfile.write_text("dummy")
-
-        with patch("exif_heal.exiftool.subprocess.run", return_value=mock_result):
-            written, errors, stderr = write_via_argfile(
-                argfile, ["/test/a.jpg", "/test/b.jpg"],
-            )
-        # Only 1 batch result for 2 expected paths — second file not marked
+    def test_signed_gps_landed(self, tmp_dir):
+        """GPS verification uses the SIGNED value (Composite), so a southern
+        coordinate must match its negative intended value."""
+        changes = [{"path": "/test/a.jpg", "gps": {"lat": -34.5, "lon": 138.6}}]
+        records = [{
+            "SourceFile": "/test/a.jpg",
+            "GPS:GPSLatitude": 34.5,           # unsigned magnitude
+            "GPS:GPSLongitude": 138.6,
+            "Composite:GPSLatitude": -34.5,    # signed
+            "Composite:GPSLongitude": 138.6,
+        }]
+        written, errors, _ = self._run(tmp_dir, changes, records)
         assert written == ["/test/a.jpg"]
+        assert errors == 0
+
+    def test_wrong_gps_not_marked(self, tmp_dir):
+        changes = [{"path": "/test/a.jpg", "gps": {"lat": -34.5, "lon": 138.6}}]
+        records = [{
+            "SourceFile": "/test/a.jpg",
+            "Composite:GPSLatitude": 34.5,     # sign flipped -> mismatch
+            "Composite:GPSLongitude": 138.6,
+        }]
+        written, errors, _ = self._run(tmp_dir, changes, records)
+        assert written == []
+        assert errors == 1
 
 
 @skip_no_exiftool
@@ -273,8 +305,7 @@ class TestWriteViaArgfile:
         argfile = tmp_dir / "args.txt"
         argfile.write_text(content)
 
-        expected_paths = [change["path"] for change in changes]
-        successfully_written, errors, stderr = write_via_argfile(argfile, expected_paths)
+        successfully_written, errors, stderr = write_via_argfile(argfile, changes)
         assert len(successfully_written) >= 1
         assert str(filepath) in successfully_written
         assert errors == 0
@@ -285,3 +316,63 @@ class TestWriteViaArgfile:
         dto = get_tag(records[0], "DateTimeOriginal", ["ExifIFD", "IFD0"])
         assert dto is not None
         assert "2020:06:15" in str(dto)
+
+
+def _has_ffmpeg():
+    try:
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+skip_no_ffmpeg = pytest.mark.skipif(
+    not (has_exiftool() and _has_ffmpeg()),
+    reason="ffmpeg + exiftool required for video tests",
+)
+
+
+@skip_no_ffmpeg
+class TestVideoReadWrite:
+
+    def test_read_video_time_and_gps(self, tmp_dir, create_video):
+        """A video's QuickTime time + signed GPS is read correctly."""
+        f = create_video(
+            name="clip.mov",
+            create_date="2019:05:20 14:30:00",
+            gps_lat=-34.93,
+            gps_lon=138.61,
+        )
+        records = batch_read_files([f])
+        assert len(records) == 1
+        r = records[0]
+        assert get_tag(r, "CreateDate", ["QuickTime"]) is not None
+        # Signed GPS via Composite (southern hemisphere stays negative)
+        coords = read_gps(r)
+        assert coords is not None
+        assert coords[0] == pytest.approx(-34.93, abs=1e-3)
+        assert coords[1] == pytest.approx(138.61, abs=1e-3)
+
+    def test_write_video_time_and_gps_round_trip(self, tmp_dir, create_video):
+        """Writing via the QuickTime branch round-trips through verification."""
+        f = create_video(name="clean.mp4")  # no metadata
+
+        changes = [{
+            "path": str(f),
+            "time": {"datetime_original": "2018:07:01 10:05:00",
+                     "create_date": "2018:07:01 10:05:00",
+                     "modify_date": "2018:07:01 10:05:00"},
+            "gps": {"lat": -34.93, "lon": 138.61},
+        }]
+        argfile = tmp_dir / "args.txt"
+        argfile.write_text(generate_argfile(changes, tag_provenance=False, xmp_mirror=False))
+
+        written, errors, _ = write_via_argfile(argfile, changes)
+        assert written == [str(f)]
+        assert errors == 0
+
+        # Confirm on disk
+        r = batch_read_files([f])[0]
+        assert "2018:07:01 10:05:00" in str(get_tag(r, "CreateDate", ["QuickTime"]))
+        coords = read_gps(r)
+        assert coords[0] == pytest.approx(-34.93, abs=1e-3)

@@ -110,6 +110,47 @@ Reads proposed changes from the cache and writes them to files via ExifTool.
 - `--min-confidence-gps LEVEL` - Re-evaluate GPS confidence threshold at apply time
 - `--no-tag-provenance` - Don't write XMP provenance tags
 - `--no-xmp-mirror` - Don't mirror EXIF tags to XMP equivalents
+- `--jobs N` / `-j N` - Parallel exiftool reads (default: # CPU cores). Reads
+  run concurrently per directory; inference and writes stay serial, so output
+  is identical regardless of worker count. Parallelism is per-directory, so
+  libraries with many folders benefit most.
+
+### Shift Command (timezone repair)
+
+```bash
+exif-heal shift --root <directory> --ext dng,arw \
+  (--from-tz <ZONE> --to-tz <ZONE> | --shift <+H:MM>) [--commit]
+```
+
+Corrects timestamps that are **present but wrong** — e.g. a batch of RAW files
+shot while the camera clock was set to the wrong timezone. It shifts
+`DateTimeOriginal` / `CreateDate` / `ModifyDate` on matching files; **GPS is
+never touched**. This is separate from the scan/apply gap-filling and does not
+use the cache. Dry-run by default.
+
+**Key options:**
+
+- `--root PATH` / `--ext LIST` - Scope: point at the batch folder and list its
+  extensions (e.g. `dng,arw`). Everything matching under the root is shifted.
+- `--from-tz ZONE --to-tz ZONE` - DST-aware correction: reinterpret the stored
+  wall-clock time as `from-tz` and re-express the same instant in `to-tz`
+  (e.g. camera left on `America/Los_Angeles` while shooting in `Europe/Berlin`).
+- `--shift +H:MM` - Alternatively, apply a fixed signed offset (e.g. `+9:00`).
+- `--make SUBSTR` - Only shift files whose Make/Model contains this substring
+  (safety for mixed folders).
+- `--commit` - Actually write (default is dry-run preview).
+- `--backup-dir PATH` - Copy originals before modifying.
+
+```bash
+# Preview first
+exif-heal shift --root /photos/Trip2018 --ext dng,arw \
+  --from-tz America/Los_Angeles --to-tz Europe/Berlin
+
+# Then commit, with backups
+exif-heal shift --root /photos/Trip2018 --ext dng,arw \
+  --from-tz America/Los_Angeles --to-tz Europe/Berlin \
+  --commit --backup-dir /backup/Trip2018
+```
 
 ## How It Works
 
@@ -248,10 +289,12 @@ pytest tests/test_time_infer.py -v
 
 See [ISSUES.md](ISSUES.md) for tracked issues and future improvements.
 
-- `--write-xmp-sidecar` flag accepted but not yet implemented
-- `--timezone` flag accepted but not yet applied to parsing/inference
 - Argfile generation doesn't handle filenames with newlines
 - Provenance tags only written when changes are applied (not for files that already have complete EXIF)
+
+DNG/RAW metadata is written **in place** (exiftool writes the TIFF/EP IFDs
+directly); there is no XMP-sidecar mode. If you archive RAW originals as
+immutable, back them up with `--backup-dir` before `--commit`.
 
 ## License
 

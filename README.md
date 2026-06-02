@@ -215,14 +215,18 @@ For files missing GPS coordinates that have a capture time (original or inferred
 
 ### Provenance Tags
 
-By default, exif-heal writes XMP provenance tags to document metadata sources:
+By default, exif-heal writes XMP provenance tags to document metadata sources.
+They live in a custom `exifheal` XMP namespace, made writable via a bundled
+exiftool `-config`; the values persist as standard XMP and read back without
+the config:
 
-- `XMP-xmp:ExifHealTimeSource` = exif_dto|exif_create|filename|neighbor_interp|neighbor_copy|mtime|default_hint
-- `XMP-xmp:ExifHealTimeConfidence` = high|med|low
-- `XMP-xmp:ExifHealGPSSource` = exif|neighbor_copy|default_hint|none
-- `XMP-xmp:ExifHealGPSConfidence` = high|med|low|none
+- `XMP-exifheal:TimeSource` = exif_dto|exif_create|filename|neighbor_interp|neighbor_copy|mtime|default_hint
+- `XMP-exifheal:TimeConfidence` = high|med|low
+- `XMP-exifheal:GPSSource` = exif|neighbor_copy|default_hint|none
+- `XMP-exifheal:GPSConfidence` = high|med|low|none
 
-This makes it trivial to filter in Immich/Lightroom: search for `ExifHealGPSSource=default_hint` to find all placeholder-GPS photos.
+This makes it trivial to filter in Immich/Lightroom: search for
+`XMP-exifheal:GPSSource=default_hint` to find all placeholder-GPS photos.
 
 ## Example Workflow
 

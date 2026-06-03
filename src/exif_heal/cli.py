@@ -96,7 +96,8 @@ def main():
 @click.option("--limit", type=int, default=None,
               help="Stop after N proposed changes")
 @click.option("--allow-jumps", is_flag=True,
-              help="Apply (downgraded) instead of skipping implausible-speed GPS")
+              help="Propose implausible-speed GPS as LOW instead of skipping "
+                   "(still gated unless --min-confidence-gps low)")
 @click.option("--allow-low-confidence", is_flag=True,
               help="Apply LOW confidence changes (default: MED+ only)")
 @click.option("--min-confidence-time", default="med",

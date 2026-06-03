@@ -306,6 +306,34 @@ class TestSpeedGuardrail:
         assert len(gap) == 1 and gap[0].skipped
         assert gap[0].gps_implied_speed_kmh > 1200
 
+    def test_skip_audit_survives_when_file_also_has_time_change(self):
+        """Codex repro: a speed-skipped GPS for a file that ALSO has a time
+        change must record the skip on that change (not be dropped), and must
+        not propose GPS."""
+        from exif_heal.models import ProposedChange
+        gap = _make_gps_record("gap.jpg", capture_time=datetime(2020, 1, 1, 10, 5))
+        files = [
+            _make_gps_record("a.jpg", capture_time=datetime(2020, 1, 1, 10, 0),
+                             gps=GPSCoord(-34.0, 138.0)),
+            gap,
+            _make_gps_record("b.jpg", capture_time=datetime(2020, 1, 1, 10, 10),
+                             gps=GPSCoord(-34.0, 143.0)),  # impossible speed
+        ]
+        # Simulate a time proposal already existing for gap.jpg.
+        time_change = ProposedChange(path=gap.path,
+                                     new_datetime_original="2020:01:01 10:05:00")
+        existing = {str(gap.path): time_change}
+        new_changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200,
+                                existing_changes=existing)
+        # No standalone gap change created (it merged into the time change)...
+        assert all(c.path.name != "gap.jpg" for c in new_changes)
+        # ...and the time change carries the skip audit, with GPS NOT proposed.
+        assert time_change.gps_skipped is True
+        assert time_change.gps_skip_reason
+        assert time_change.gps_implied_speed_kmh > 1200
+        assert time_change.new_gps is None
+        assert time_change.has_time_change  # time still applies
+
     def test_allow_jumps_downgrades_instead_of_skipping(self):
         files = [
             _make_gps_record("a.jpg", capture_time=datetime(2020, 1, 1, 10, 0),

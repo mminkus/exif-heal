@@ -416,7 +416,7 @@ def scan(
                 summary.files_proposed_time += 1
             if change.has_gps_change:
                 summary.files_proposed_gps += 1
-            if change.skipped:
+            if change.skipped or change.gps_skipped:
                 summary.files_skipped_guardrails += 1
             if change.gated_time or change.gated_gps:
                 summary.files_gated += 1
@@ -487,6 +487,8 @@ def _change_to_dict(change: ProposedChange) -> dict:
     }
     d["skipped"] = change.skipped
     d["skip_reason"] = change.skip_reason
+    d["gps_skipped"] = change.gps_skipped
+    d["gps_skip_reason"] = change.gps_skip_reason
     d["gated_time"] = change.gated_time
     d["gated_gps"] = change.gated_gps
     d["gate_reason"] = change.gate_reason

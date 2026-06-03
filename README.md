@@ -81,7 +81,7 @@ Walks the directory tree, reads EXIF metadata via ExifTool, infers missing times
 **GPS inference options:**
 
 - `--max-speed-kmh KMH` - GPS-jump guard: reject a copy only if the GPS field around a photo moves faster than this (default: 1200; data-error guard, not a travel limit)
-- `--allow-jumps` - Apply implausible-speed GPS as LOW confidence instead of skipping
+- `--allow-jumps` - Propose implausible-speed GPS as LOW confidence instead of skipping (still gated unless you also pass `--min-confidence-gps low`)
 - `--default-gps LAT,LON` - Fallback GPS for files without neighbors
 - `--gps-hints PATH` - JSON file with time-period GPS defaults (see below)
 - `--only-missing-gps` - Only process files missing GPS

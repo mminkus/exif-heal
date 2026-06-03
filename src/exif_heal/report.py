@@ -50,6 +50,10 @@ def write_report_line(
         entry["skipped"] = True
         entry["skip_reason"] = proposed.skip_reason
 
+    if proposed.gps_skipped:
+        entry["gps_skipped"] = True
+        entry["gps_skip_reason"] = proposed.gps_skip_reason
+
     if proposed.gated_time or proposed.gated_gps:
         entry["gated"] = True
         entry["gated_time"] = proposed.gated_time

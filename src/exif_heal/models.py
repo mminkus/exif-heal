@@ -182,6 +182,11 @@ class ProposedChange:
     gated_gps: bool = False
     gate_reason: str = ""
 
+    # GPS-specific skip (speed guardrail), recorded even when the file still has
+    # a valid time change — so the audit survives dedup with that time change.
+    gps_skipped: bool = False
+    gps_skip_reason: str = ""
+
     @property
     def has_time_change(self) -> bool:
         return self.new_datetime_original is not None

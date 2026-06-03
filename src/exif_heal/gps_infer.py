@@ -250,20 +250,34 @@ def infer_gps(
                             "Implausible GPS speed for %s: %.0fkm/h (max=%s), skipping",
                             record.filename, implied_speed, max_speed_kmh,
                         )
-                        change = ProposedChange(
-                            path=record.path,
-                            new_gps=coord,
-                            gps_confidence=confidence,
-                            gps_source=source,
-                            reason_gps=reason,
-                            gps_implied_speed_kmh=implied_speed,
-                            skipped=True,
-                            skip_reason=(
-                                f"implausible GPS speed {implied_speed:.0f}km/h "
-                                f"> {max_speed_kmh:.0f}km/h"
-                            ),
+                        skip_reason = (
+                            f"implausible GPS speed {implied_speed:.0f}km/h "
+                            f"> {max_speed_kmh:.0f}km/h"
                         )
-                        changes.append(change)
+                        path_str = str(record.path)
+                        if path_str in existing_changes:
+                            # File also has a time change. Record the GPS skip on
+                            # it (without proposing GPS) so the audit isn't lost
+                            # when the scanner dedups against the time change.
+                            existing = existing_changes[path_str]
+                            existing.gps_skipped = True
+                            existing.gps_skip_reason = skip_reason
+                            existing.gps_implied_speed_kmh = implied_speed
+                            existing.reason_gps = reason
+                            existing.neighbors_gps = neighbors_gps
+                        else:
+                            changes.append(ProposedChange(
+                                path=record.path,
+                                new_gps=coord,
+                                gps_confidence=confidence,
+                                gps_source=source,
+                                reason_gps=reason,
+                                gps_implied_speed_kmh=implied_speed,
+                                gps_skipped=True,
+                                gps_skip_reason=skip_reason,
+                                skipped=True,
+                                skip_reason=skip_reason,
+                            ))
                         continue
 
         # Merge into existing time change or create new

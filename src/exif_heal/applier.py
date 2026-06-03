@@ -30,6 +30,22 @@ class ApplySummary:
     dry_run: bool = True
 
 
+def _filter_provenance(provenance: dict, wrote_time: bool, wrote_gps: bool):
+    """Keep only the provenance fields for halves actually written.
+
+    Returns the filtered dict, or None if nothing remains (so the caller can
+    omit provenance entirely).
+    """
+    prov = dict(provenance)
+    if not wrote_time:
+        prov.pop("time_source", None)
+        prov.pop("time_confidence", None)
+    if not wrote_gps:
+        prov.pop("gps_source", None)
+        prov.pop("gps_confidence", None)
+    return prov if any(prov.values()) else None
+
+
 def apply_changes(
     cache: MetadataCache,
     root: Path,
@@ -97,16 +113,23 @@ def apply_changes(
         effective = {"path": change["path"]}
         has_anything = False
 
-        if has_time and not time_gated:
+        wrote_time = has_time and not time_gated
+        wrote_gps = has_gps and not gps_gated
+        if wrote_time:
             effective["time"] = change["time"]
             has_anything = True
 
-        if has_gps and not gps_gated:
+        if wrote_gps:
             effective["gps"] = change["gps"]
             has_anything = True
 
         if tag_provenance and "provenance" in change:
-            effective["provenance"] = change["provenance"]
+            # Only record provenance for the halves actually written — otherwise
+            # a gated-GPS change would still stamp XMP-exifheal:GPSSource even
+            # though no GPS was applied.
+            prov = _filter_provenance(change["provenance"], wrote_time, wrote_gps)
+            if prov:
+                effective["provenance"] = prov
 
         if has_anything:
             eligible.append(effective)

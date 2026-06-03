@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,11 @@ from .models import is_quicktime_video
 logger = logging.getLogger(__name__)
 
 EXIFTOOL = "exiftool"
+
+# Files per exiftool read call. Reading thousands of large RAWs in a single
+# call can exceed the per-call timeout and silently drop a whole directory, so
+# directory reads are chunked. Each chunk is well within the timeout.
+READ_CHUNK_SIZE = 1000
 
 # Config defining the custom XMP-exifheal:* provenance namespace. Required
 # (via -config) to WRITE those tags; reads work without it. Empty list if the
@@ -58,54 +64,51 @@ READ_TAGS = [
 ]
 
 
+def _list_dir_files(directory: Path, extensions: list[str]) -> list[Path]:
+    """Non-recursively list files in `directory` matching `extensions`
+    (case-insensitive), sorted for determinism."""
+    exts = {e.lstrip(".").lower() for e in extensions}
+    files: list[Path] = []
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                name = entry.name
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if ext in exts:
+                    files.append(Path(entry.path))
+    except OSError as e:
+        logger.error("Cannot list directory %s: %s", directory, e)
+    return sorted(files)
+
+
 def batch_read_directory(
     directory: Path,
     extensions: list[str],
 ) -> list[dict]:
     """Read metadata for all matching files in a directory via JSON.
 
-    Runs one exiftool invocation per directory (non-recursive).
+    Non-recursive. Reads in chunks of READ_CHUNK_SIZE files so a very large
+    directory can't exceed the per-call timeout and silently drop every file.
     Returns list of raw exiftool JSON dicts, one per file.
     """
-    cmd = [EXIFTOOL, *CONFIG_ARGS, "-j", "-n", "-G1", "-api", "IgnoreMinorErrors=1"]
-    cmd.extend(READ_TAGS)
-    for ext in extensions:
-        cmd.extend(["-ext", ext])
-    cmd.append(str(directory) + "/")
+    files = _list_dir_files(directory, extensions)
+    if not files:
+        return []
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
+    records: list[dict] = []
+    for i in range(0, len(files), READ_CHUNK_SIZE):
+        records.extend(batch_read_files(files[i:i + READ_CHUNK_SIZE]))
+
+    if len(records) < len(files):
+        logger.warning(
+            "Read %d of %d files in %s — %d not returned (unreadable or timed out)",
+            len(records), len(files), directory, len(files) - len(records),
         )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"exiftool not found. Install it: https://exiftool.org/"
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("exiftool timed out reading %s", directory)
-        return []
-
-    # exiftool exits with 1 when no files match, 2 for errors
-    if result.returncode == 1 and not result.stdout.strip():
-        return []
-
-    if result.stderr:
-        for line in result.stderr.strip().split("\n"):
-            if line.strip():
-                logger.debug("exiftool stderr: %s", line.strip())
-
-    if not result.stdout.strip():
-        return []
-
-    try:
-        records = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        logger.error("Failed to parse exiftool JSON for %s: %s", directory, e)
-        return []
-
     return records
 
 

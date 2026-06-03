@@ -363,7 +363,7 @@ def scan(
             gps_changes = infer_gps(
                 records,
                 max_time_gap=config.max_time_gap,
-                max_distance_km=config.max_distance_km,
+                max_speed_kmh=config.max_speed_kmh,
                 allow_jumps=config.allow_jumps,
                 default_gps=config.default_gps,
                 gps_hints=config.gps_hints,

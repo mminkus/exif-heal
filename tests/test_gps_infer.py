@@ -207,7 +207,7 @@ class TestInferGPS:
                 capture_time=datetime(2020, 1, 1, 10, 30),
             ),
         ]
-        changes = infer_gps(files, max_time_gap=21600, max_distance_km=50)
+        changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200)
         assert len(changes) == 1
         assert changes[0].new_gps is not None
         assert changes[0].new_gps.lat == pytest.approx(-34.5)
@@ -229,7 +229,7 @@ class TestInferGPS:
             ),
         ]
         changes = infer_gps(
-            files, max_time_gap=21600, max_distance_km=50,
+            files, max_time_gap=21600, max_speed_kmh=1200,
             gps_hints=hints,
         )
         assert len(changes) == 1
@@ -244,7 +244,7 @@ class TestInferGPS:
                 gps=GPSCoord(-34.5, 138.5),
             ),
         ]
-        changes = infer_gps(files, max_time_gap=21600, max_distance_km=50)
+        changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200)
         assert len(changes) == 0
 
     def test_force_reprocesses_gps_files(self):
@@ -262,15 +262,63 @@ class TestInferGPS:
             ),
         ]
         # Without force: nothing proposed
-        changes = infer_gps(files, max_time_gap=21600, max_distance_km=50, force=False)
+        changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200, force=False)
         assert len(changes) == 0
 
         # With force: has_gps.jpg gets a proposal from the anchor
-        changes = infer_gps(files, max_time_gap=21600, max_distance_km=50, force=True)
+        changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200, force=True)
         assert len(changes) >= 1
         forced = [c for c in changes if c.path.name == "has_gps.jpg"]
         assert len(forced) == 1
         assert forced[0].new_gps is not None
+
+
+class TestSpeedGuardrail:
+    """Reject GPS copies only when the field moves at an impossible speed; real
+    multi-location travel within a folder must pass."""
+
+    def test_plausible_travel_accepted(self):
+        files = [
+            _make_gps_record("a.jpg", capture_time=datetime(2020, 1, 1, 10, 0),
+                             gps=GPSCoord(-34.0, 138.0)),
+            _make_gps_record("gap.jpg", capture_time=datetime(2020, 1, 1, 12, 0)),
+            # ~460 km away, 5h later => ~92 km/h => fine
+            _make_gps_record("b.jpg", capture_time=datetime(2020, 1, 1, 15, 0),
+                             gps=GPSCoord(-34.0, 143.0)),
+        ]
+        changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200)
+        gap = [c for c in changes if c.path.name == "gap.jpg"]
+        assert len(gap) == 1
+        assert gap[0].new_gps is not None
+        assert not gap[0].skipped
+
+    def test_impossible_speed_skipped(self):
+        files = [
+            _make_gps_record("a.jpg", capture_time=datetime(2020, 1, 1, 10, 0),
+                             gps=GPSCoord(-34.0, 138.0)),
+            _make_gps_record("gap.jpg", capture_time=datetime(2020, 1, 1, 10, 5)),
+            # ~460 km away, 10 min later => ~2760 km/h => impossible
+            _make_gps_record("b.jpg", capture_time=datetime(2020, 1, 1, 10, 10),
+                             gps=GPSCoord(-34.0, 143.0)),
+        ]
+        changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200)
+        gap = [c for c in changes if c.path.name == "gap.jpg"]
+        assert len(gap) == 1 and gap[0].skipped
+        assert gap[0].gps_implied_speed_kmh > 1200
+
+    def test_allow_jumps_downgrades_instead_of_skipping(self):
+        files = [
+            _make_gps_record("a.jpg", capture_time=datetime(2020, 1, 1, 10, 0),
+                             gps=GPSCoord(-34.0, 138.0)),
+            _make_gps_record("gap.jpg", capture_time=datetime(2020, 1, 1, 10, 5)),
+            _make_gps_record("b.jpg", capture_time=datetime(2020, 1, 1, 10, 10),
+                             gps=GPSCoord(-34.0, 143.0)),
+        ]
+        changes = infer_gps(files, max_time_gap=21600, max_speed_kmh=1200,
+                            allow_jumps=True)
+        gap = [c for c in changes if c.path.name == "gap.jpg"]
+        assert len(gap) == 1 and not gap[0].skipped
+        assert gap[0].gps_confidence == Confidence.LOW
 
 
 class TestBulkCopyGPS:
@@ -294,11 +342,11 @@ class TestBulkCopyGPS:
         donor = self._rec("donor.jpg", gps=GPSCoord(lat=-34.9, lon=138.6))
         target = self._rec("target.jpg")
         changes = infer_gps([donor, target], max_time_gap=21600,
-                            max_distance_km=50, use_mtime=False)
+                            max_speed_kmh=1200, use_mtime=False)
         assert all(c.path.name != "target.jpg" for c in changes)
         # Confirm the bug WOULD trigger with mtime allowed (HIGH-conf copy).
         changes2 = infer_gps([donor, target], max_time_gap=21600,
-                             max_distance_km=50, use_mtime=True)
+                             max_speed_kmh=1200, use_mtime=True)
         bogus = [c for c in changes2 if c.path.name == "target.jpg"]
         assert bogus and bogus[0].gps_confidence == Confidence.HIGH
 

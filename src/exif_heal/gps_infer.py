@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 EARTH_RADIUS_KM = 6371.0
 
+# Default ceiling for plausible travel between two GPS fixes. Commercial flight
+# cruises ~900 km/h; 1200 leaves margin. Anything faster around a photo implies
+# a GPS data error, not real movement. Override via --max-speed-kmh / allow_jumps.
+DEFAULT_MAX_SPEED_KMH = 1200.0
+
 
 def haversine_km(a: GPSCoord, b: GPSCoord) -> float:
     """Haversine distance in km between two GPS coordinates."""
@@ -95,6 +100,37 @@ def find_gps_neighbor(
     return best
 
 
+def find_gps_bracket(
+    target: FileRecord,
+    files: list[FileRecord],
+    use_mtime: bool = True,
+) -> tuple[Optional[FileRecord], Optional[FileRecord]]:
+    """Nearest GPS-bearing files strictly before and after the target in time.
+
+    Used by the speed-plausibility guardrail to check how fast the GPS field is
+    moving around the target. Returns (before, after); either may be None.
+    """
+    tt = _effective_time(target, use_mtime)
+    if tt is None:
+        return None, None
+    before = after = None
+    before_dt = after_dt = None
+    for f in files:
+        if f.path == target.path or f.gps is None:
+            continue
+        ft = _effective_time(f, use_mtime)
+        if ft is None:
+            continue
+        dt = (ft - tt).total_seconds()
+        if dt < 0:
+            if before is None or dt > before_dt:
+                before, before_dt = f, dt
+        elif dt > 0:
+            if after is None or dt < after_dt:
+                after, after_dt = f, dt
+    return before, after
+
+
 def lookup_gps_hint(
     capture_time: Optional[datetime],
     hints: list[GPSHint],
@@ -118,7 +154,7 @@ def lookup_gps_hint(
 def infer_gps(
     files: list[FileRecord],
     max_time_gap: int,
-    max_distance_km: float,
+    max_speed_kmh: float = DEFAULT_MAX_SPEED_KMH,
     allow_jumps: bool = False,
     default_gps: Optional[GPSCoord] = None,
     gps_hints: Optional[list[GPSHint]] = None,
@@ -131,8 +167,9 @@ def infer_gps(
     Args:
         files: All FileRecords in one directory.
         max_time_gap: Maximum seconds between target and GPS donor.
-        max_distance_km: Jump guard radius.
-        allow_jumps: Allow GPS beyond max_distance_km.
+        max_speed_kmh: Reject a copy only if the GPS field around the target
+            moves faster than this (data error); travel across a multi-location
+            folder is fine. allow_jumps downgrades instead of skipping.
         default_gps: Simple fallback GPS for all files.
         gps_hints: Time-period GPS hints.
         existing_changes: Dict mapping path -> ProposedChange from time inference,
@@ -144,7 +181,6 @@ def infer_gps(
     if existing_changes is None:
         existing_changes = {}
 
-    centroid = compute_folder_centroid(files)
     changes = []
 
     for record in files:
@@ -191,32 +227,44 @@ def infer_gps(
         if coord is None:
             continue
 
-        # Centroid jump check (skip for default hints — they're expected to be far)
-        centroid_dist = 0.0
-        if centroid and source != GPSSource.DEFAULT_HINT:
-            centroid_dist = haversine_km(coord, centroid)
-            if centroid_dist > max_distance_km:
-                if allow_jumps:
-                    confidence = Confidence.LOW
-                    reason += f" [GPS JUMP: {centroid_dist:.1f}km from centroid]"
-                else:
-                    logger.warning(
-                        "GPS jump for %s: %.1fkm from centroid (max=%s), skipping",
-                        record.filename, centroid_dist, max_distance_km,
-                    )
-                    # Record as skipped
-                    change = ProposedChange(
-                        path=record.path,
-                        new_gps=coord,
-                        gps_confidence=confidence,
-                        gps_source=source,
-                        reason_gps=reason,
-                        gps_centroid_distance_km=centroid_dist,
-                        skipped=True,
-                        skip_reason=f"GPS jump {centroid_dist:.1f}km > {max_distance_km}km",
-                    )
-                    changes.append(change)
-                    continue
+        # Speed-plausibility guardrail (skip for default hints, expected to be
+        # far). Replaces the folder-centroid check, which wrongly flagged
+        # multi-location travel folders. Reject only when the GPS field around
+        # the target moves at an impossible speed (data error): measure the
+        # implied speed between the nearest GPS files before and after it.
+        implied_speed = 0.0
+        if source != GPSSource.DEFAULT_HINT:
+            before, after = find_gps_bracket(record, files, use_mtime)
+            if before is not None and after is not None:
+                sep_km = haversine_km(before.gps, after.gps)
+                bt = _effective_time(before, use_mtime)
+                at = _effective_time(after, use_mtime)
+                hours = abs((at - bt).total_seconds()) / 3600.0
+                implied_speed = sep_km / hours if hours > 0 else float("inf")
+                if implied_speed > max_speed_kmh:
+                    if allow_jumps:
+                        confidence = Confidence.LOW
+                        reason += f" [GPS SPEED: {implied_speed:.0f}km/h around photo]"
+                    else:
+                        logger.warning(
+                            "Implausible GPS speed for %s: %.0fkm/h (max=%s), skipping",
+                            record.filename, implied_speed, max_speed_kmh,
+                        )
+                        change = ProposedChange(
+                            path=record.path,
+                            new_gps=coord,
+                            gps_confidence=confidence,
+                            gps_source=source,
+                            reason_gps=reason,
+                            gps_implied_speed_kmh=implied_speed,
+                            skipped=True,
+                            skip_reason=(
+                                f"implausible GPS speed {implied_speed:.0f}km/h "
+                                f"> {max_speed_kmh:.0f}km/h"
+                            ),
+                        )
+                        changes.append(change)
+                        continue
 
         # Merge into existing time change or create new
         path_str = str(record.path)
@@ -227,7 +275,7 @@ def infer_gps(
             existing.gps_source = source
             existing.reason_gps = reason
             existing.neighbors_gps = neighbors_gps
-            existing.gps_centroid_distance_km = centroid_dist
+            existing.gps_implied_speed_kmh = implied_speed
             existing.gps_hint_label = hint_label
         else:
             change = ProposedChange(
@@ -237,7 +285,7 @@ def infer_gps(
                 gps_source=source,
                 reason_gps=reason,
                 neighbors_gps=neighbors_gps,
-                gps_centroid_distance_km=centroid_dist,
+                gps_implied_speed_kmh=implied_speed,
                 gps_hint_label=hint_label,
             )
             changes.append(change)

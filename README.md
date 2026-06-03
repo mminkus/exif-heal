@@ -80,8 +80,8 @@ Walks the directory tree, reads EXIF metadata via ExifTool, infers missing times
 
 **GPS inference options:**
 
-- `--max-distance-km KM` - Max GPS jump distance (default: 50)
-- `--allow-jumps` - Allow GPS beyond max-distance-km
+- `--max-speed-kmh KMH` - GPS-jump guard: reject a copy only if the GPS field around a photo moves faster than this (default: 1200; data-error guard, not a travel limit)
+- `--allow-jumps` - Apply implausible-speed GPS as LOW confidence instead of skipping
 - `--default-gps LAT,LON` - Fallback GPS for files without neighbors
 - `--gps-hints PATH` - JSON file with time-period GPS defaults (see below)
 - `--only-missing-gps` - Only process files missing GPS
@@ -210,8 +210,8 @@ For files missing GPS coordinates that have a capture time (original or inferred
 
 **Guardrails:**
 
-- GPS jumps beyond `--max-distance-km` from folder centroid are downgraded or skipped
-- Default-gps and hints are exempt from jump checking (expected to be placeholders)
+- A GPS copy is skipped (or downgraded with `--allow-jumps`) only when the GPS field around a photo implies an impossible travel speed (> `--max-speed-kmh`) — i.e. a data error. Normal multi-location travel within a folder is preserved.
+- Default-gps and hints are exempt from the speed check (expected to be placeholders)
 
 ### Provenance Tags
 
@@ -274,7 +274,7 @@ pytest tests/test_time_infer.py -v
 - [cli.py](src/exif_heal/cli.py) - Click CLI with scan/apply subcommands
 - [scanner.py](src/exif_heal/scanner.py) - Scan orchestrator: walk dirs, read metadata, infer, propose
 - [time_infer.py](src/exif_heal/time_infer.py) - Filename parsing, neighbor interpolation, bulk-copy detection
-- [gps_infer.py](src/exif_heal/gps_infer.py) - GPS neighbor copy, hints, haversine distance, centroid checks
+- [gps_infer.py](src/exif_heal/gps_infer.py) - GPS neighbor copy, hints, haversine distance, speed-plausibility guardrail
 - [confidence.py](src/exif_heal/confidence.py) - Confidence scoring and gating logic
 - [cache.py](src/exif_heal/cache.py) - SQLite metadata cache with freshness checks
 - [exiftool.py](src/exif_heal/exiftool.py) - ExifTool subprocess wrapper (JSON-only, no text parsing)

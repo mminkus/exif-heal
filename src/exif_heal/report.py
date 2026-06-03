@@ -40,7 +40,7 @@ def write_report_line(
         "gps_source": proposed.gps_source.value,
         "neighbors_used": proposed.neighbors_time + proposed.neighbors_gps,
         "mtime_drift_years": round(proposed.time_mtime_drift_years, 2),
-        "gps_centroid_distance_km": round(proposed.gps_centroid_distance_km, 2),
+        "gps_implied_speed_kmh": round(proposed.gps_implied_speed_kmh, 2),
     }
 
     if proposed.gps_hint_label:

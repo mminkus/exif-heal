@@ -87,8 +87,8 @@ def main():
               help="SQLite cache path")
 @click.option("--max-time-gap", default=21600, type=int,
               help="Max seconds between neighbors for interpolation (default: 6h)")
-@click.option("--max-distance-km", default=50.0, type=float,
-              help="Max km for GPS jump guard")
+@click.option("--max-speed-kmh", default=1200.0, type=float,
+              help="GPS-jump guard: max plausible travel speed (default: 1200)")
 @click.option("--only-missing-time", is_flag=True,
               help="Only process files missing timestamps")
 @click.option("--only-missing-gps", is_flag=True,
@@ -96,7 +96,7 @@ def main():
 @click.option("--limit", type=int, default=None,
               help="Stop after N proposed changes")
 @click.option("--allow-jumps", is_flag=True,
-              help="Allow GPS jumps beyond max-distance-km")
+              help="Apply (downgraded) instead of skipping implausible-speed GPS")
 @click.option("--allow-low-confidence", is_flag=True,
               help="Apply LOW confidence changes (default: MED+ only)")
 @click.option("--min-confidence-time", default="med",
@@ -116,7 +116,7 @@ def main():
 @click.option("--verbose", "-v", is_flag=True,
               help="Enable debug logging")
 def scan_cmd(root, ext, recursive, exclude_glob, no_default_excludes,
-             report, cache_path, max_time_gap, max_distance_km,
+             report, cache_path, max_time_gap, max_speed_kmh,
              only_missing_time, only_missing_gps, limit,
              allow_jumps, allow_low_confidence, min_confidence_time,
              min_confidence_gps, force, default_gps, gps_hints,
@@ -143,7 +143,7 @@ def scan_cmd(root, ext, recursive, exclude_glob, no_default_excludes,
         extensions=extensions,
         recursive=recursive,
         max_time_gap=max_time_gap,
-        max_distance_km=max_distance_km,
+        max_speed_kmh=max_speed_kmh,
         only_missing_time=only_missing_time,
         only_missing_gps=only_missing_gps,
         limit=limit,

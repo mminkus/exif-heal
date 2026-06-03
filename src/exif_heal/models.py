@@ -172,7 +172,7 @@ class ProposedChange:
 
     # Guardrail flags
     time_mtime_drift_years: float = 0.0
-    gps_centroid_distance_km: float = 0.0
+    gps_implied_speed_kmh: float = 0.0
     gps_hint_label: str = ""
 
     # Gating
@@ -203,7 +203,7 @@ class ScanConfig:
     extensions: list[str]
     recursive: bool = True
     max_time_gap: int = 21600  # 6 hours in seconds
-    max_distance_km: float = 50.0
+    max_speed_kmh: float = 1200.0  # GPS-jump guard: max plausible travel speed
     only_missing_time: bool = False
     only_missing_gps: bool = False
     limit: Optional[int] = None

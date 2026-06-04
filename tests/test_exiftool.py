@@ -103,6 +103,16 @@ class TestBatchRead:
         records = batch_read_directory(tmp_dir, ["jpg"])
         assert len(records) == 1
 
+    def test_chunked_read_returns_all_files(self, tmp_dir, create_jpeg, monkeypatch):
+        # Regression: a directory larger than one read-chunk must return ALL
+        # files (the silent-drop fix reads in bounded chunks). Force a tiny
+        # chunk so 5 files cross the boundary (3 chunks).
+        for i in range(5):
+            create_jpeg(name=f"f{i}.jpg", datetime_original="2020:01:01 10:00:00")
+        monkeypatch.setattr("exif_heal.exiftool.READ_CHUNK_SIZE", 2)
+        records = batch_read_directory(tmp_dir, ["jpg"])
+        assert len(records) == 5
+
 
 @skip_no_exiftool
 class TestBatchReadFiles:

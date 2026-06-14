@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from functools import total_ordering
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,10 @@ def is_quicktime_video(extension: str) -> bool:
     return extension.lstrip(".").lower() in QUICKTIME_VIDEO_EXTENSIONS
 
 
+_CONFIDENCE_ORDER = {"none": 0, "low": 1, "med": 2, "high": 3}
+
+
+@total_ordering
 class Confidence(Enum):
     """Confidence level for an inferred value."""
 
@@ -29,21 +34,15 @@ class Confidence(Enum):
     LOW = "low"
     NONE = "none"
 
-    def __ge__(self, other: Confidence) -> bool:
-        order = {Confidence.NONE: 0, Confidence.LOW: 1, Confidence.MED: 2, Confidence.HIGH: 3}
-        return order[self] >= order[other]
-
-    def __gt__(self, other: Confidence) -> bool:
-        order = {Confidence.NONE: 0, Confidence.LOW: 1, Confidence.MED: 2, Confidence.HIGH: 3}
-        return order[self] > order[other]
-
-    def __le__(self, other: Confidence) -> bool:
-        order = {Confidence.NONE: 0, Confidence.LOW: 1, Confidence.MED: 2, Confidence.HIGH: 3}
-        return order[self] <= order[other]
+    @property
+    def rank(self) -> int:
+        """Ordinal rank (none=0 .. high=3) for comparison and sorting."""
+        return _CONFIDENCE_ORDER[self.value]
 
     def __lt__(self, other: Confidence) -> bool:
-        order = {Confidence.NONE: 0, Confidence.LOW: 1, Confidence.MED: 2, Confidence.HIGH: 3}
-        return order[self] < order[other]
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return self.rank < other.rank
 
 
 class TimeSource(Enum):

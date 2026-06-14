@@ -123,21 +123,15 @@ def establish_capture_time(record: FileRecord) -> FileRecord:
         record.capture_time_source = TimeSource.XMP_CREATED
         return record
 
-    # Priority 5: Filename
-    ft, has_time = parse_filename_time(record.filename)
-    if ft:
-        record.filename_time = ft
-        record.filename_time_has_time = has_time
-        record.capture_time = ft
-        record.capture_time_source = TimeSource.FILENAME
-        return record
-
-    # Priority 6: mtime (set as filename_time placeholder, not capture_time yet)
-    # mtime is only used if the directory is not bulk-copied
-    # The caller (scanner) decides whether to use mtime based on bulk-copy detection
+    # Filename time is recorded as evidence either way. If present it becomes
+    # the capture time (priority 5); if absent the record falls through to the
+    # mtime fallback, which the caller (scanner) gates on bulk-copy detection.
     ft, has_time = parse_filename_time(record.filename)
     record.filename_time = ft
     record.filename_time_has_time = has_time
+    if ft:
+        record.capture_time = ft
+        record.capture_time_source = TimeSource.FILENAME
     return record
 
 

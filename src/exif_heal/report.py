@@ -96,7 +96,7 @@ def print_plan_table(changes: list[ProposedChange], limit: Optional[int] = None)
     print("-" * 95)
 
     for change in rows:
-        filename = change.path.name if hasattr(change.path, 'name') else str(change.path).split("/")[-1]
+        filename = change.path.name
         if len(filename) > 58:
             filename = "..." + filename[-55:]
 

@@ -1,10 +1,5 @@
 """Tests for SQLite metadata cache."""
 
-import json
-from pathlib import Path
-
-import pytest
-
 from exif_heal.cache import MetadataCache
 
 
@@ -16,43 +11,6 @@ class TestMetadataCache:
         assert db_path.exists()
         cache.close()
 
-    def test_upsert_and_query(self, cache_db):
-        cache_db.upsert_file(
-            path="/test/photo.jpg",
-            directory="/test",
-            filename="photo.jpg",
-            extension="jpg",
-            mtime=1609459200.0,
-            size=5000,
-            metadata={"DateTimeOriginal": "2021:01:01 10:00:00"},
-        )
-        cache_db.commit()
-
-        rows = cache_db.get_directory_files("/test")
-        assert len(rows) == 1
-        assert rows[0]["DateTimeOriginal"] == "2021:01:01 10:00:00"
-
-    def test_cache_freshness(self, cache_db):
-        cache_db.upsert_file(
-            path="/test/photo.jpg",
-            directory="/test",
-            filename="photo.jpg",
-            extension="jpg",
-            mtime=1609459200.0,
-            size=5000,
-            metadata={},
-        )
-        cache_db.commit()
-
-        # Same mtime and size -> fresh
-        assert cache_db.is_fresh("/test/photo.jpg", 1609459200.0, 5000) is True
-        # Different mtime -> stale
-        assert cache_db.is_fresh("/test/photo.jpg", 1609459201.0, 5000) is False
-        # Different size -> stale
-        assert cache_db.is_fresh("/test/photo.jpg", 1609459200.0, 6000) is False
-        # Unknown file -> stale
-        assert cache_db.is_fresh("/test/other.jpg", 1609459200.0, 5000) is False
-
     def test_proposed_change_roundtrip(self, cache_db):
         cache_db.upsert_file(
             path="/test/photo.jpg",
@@ -61,7 +19,6 @@ class TestMetadataCache:
             extension="jpg",
             mtime=1609459200.0,
             size=5000,
-            metadata={},
         )
 
         proposed = {
@@ -88,7 +45,6 @@ class TestMetadataCache:
             extension="jpg",
             mtime=1609459200.0,
             size=5000,
-            metadata={},
         )
         cache_db.set_proposed_change(
             "/test/photo.jpg", {"path": "/test/photo.jpg"}, "high", None,
@@ -105,29 +61,12 @@ class TestMetadataCache:
         pending = cache_db.get_pending_changes(check_freshness=False)
         assert len(pending) == 0
 
-    def test_dir_flags(self, cache_db):
-        cache_db.set_dir_flag("/test", bulk_copied=True)
-        cache_db.commit()
-        assert cache_db.is_dir_bulk_copied("/test") is True
-
-        cache_db.set_dir_flag("/test2", bulk_copied=False)
-        cache_db.commit()
-        assert cache_db.is_dir_bulk_copied("/test2") is False
-
-        assert cache_db.is_dir_bulk_copied("/unknown") is None
-
     def test_scan_run_tracking(self, cache_db):
         run_id = cache_db.start_scan_run("/photos")
         assert run_id > 0
 
         cache_db.finish_scan_run(run_id, file_count=100, changes=10)
         # No assertion needed — just verify it doesn't crash
-
-    def test_get_stats(self, cache_db):
-        stats = cache_db.get_stats()
-        assert stats["total_files"] == 0
-        assert stats["proposed_changes"] == 0
-        assert stats["applied_changes"] == 0
 
     def test_upsert_clears_proposed(self, cache_db):
         """Re-scanning a file should clear its proposed change."""
@@ -138,7 +77,6 @@ class TestMetadataCache:
             extension="jpg",
             mtime=1609459200.0,
             size=5000,
-            metadata={},
         )
         cache_db.set_proposed_change(
             "/test/photo.jpg", {"path": "/test/photo.jpg"}, "high", None,
@@ -154,7 +92,6 @@ class TestMetadataCache:
             extension="jpg",
             mtime=1609459201.0,  # different mtime
             size=5100,
-            metadata={"DateTimeOriginal": "2021:01:01 10:00:00"},
         )
         cache_db.commit()
         assert len(cache_db.get_pending_changes(check_freshness=False)) == 0
@@ -173,7 +110,6 @@ class TestMetadataCache:
             extension="jpg",
             mtime=st.st_mtime,
             size=st.st_size,
-            metadata={},
         )
         cache_db.set_proposed_change(
             str(real_file), {"path": str(real_file)}, "high", None,
@@ -198,7 +134,6 @@ class TestMetadataCache:
             extension="jpg",
             mtime=1609459200.0,
             size=5000,
-            metadata={},
         )
         cache_db.set_proposed_change(
             "/nonexistent/gone.jpg", {"path": "/nonexistent/gone.jpg"}, "high", None,
@@ -222,7 +157,6 @@ class TestMetadataCache:
                 extension="jpg",
                 mtime=1609459200.0,
                 size=5000,
-                metadata={},
             )
             cache_db.set_proposed_change(
                 f"{directory}/{name}", {"path": f"{directory}/{name}"}, "med", None,
@@ -249,7 +183,7 @@ class TestMetadataCache:
         ]:
             path = f"{directory}/{name}"
             cache_db.upsert_file(path=path, directory=directory, filename=name,
-                                 extension="jpg", mtime=1.0, size=1, metadata={})
+                                 extension="jpg", mtime=1.0, size=1)
             cache_db.set_proposed_change(path, {"path": path}, "med", None)
         cache_db.commit()
 

@@ -17,7 +17,6 @@ from .cache import MetadataCache
 from .confidence import apply_confidence_gate
 from .gps_infer import infer_gps
 from .models import (
-    Confidence,
     FileRecord,
     GPSCoord,
     ProposedChange,
@@ -283,11 +282,11 @@ def scan(
                 logger.warning("Failed to parse record: %s", e)
                 continue
 
-        # Cache metadata
+        # Create a cache row per file so proposed changes can attach. Freshness
+        # uses the actual filesystem mtime (not round-tripped through exiftool
+        # datetime parsing, which strips timezone and yields a different POSIX
+        # timestamp via naive .timestamp()).
         for record in records:
-            # Use actual filesystem mtime for cache freshness (not round-tripped
-            # through exiftool datetime parsing, which strips timezone and
-            # produces a different POSIX timestamp via naive .timestamp()).
             try:
                 fs_mtime = record.path.stat().st_mtime
             except OSError:
@@ -300,17 +299,6 @@ def scan(
                 extension=record.extension,
                 mtime=fs_mtime,
                 size=record.file_size,
-                metadata={
-                    "datetime_original": record.datetime_original.isoformat() if record.datetime_original else None,
-                    "create_date": record.create_date.isoformat() if record.create_date else None,
-                    "modify_date": record.modify_date.isoformat() if record.modify_date else None,
-                    "gps_lat": record.gps.lat if record.gps else None,
-                    "gps_lon": record.gps.lon if record.gps else None,
-                    "make": record.make,
-                    "model": record.model,
-                    "capture_time": record.capture_time.isoformat() if record.capture_time else None,
-                    "capture_time_source": record.capture_time_source.value if record.capture_time_source else None,
-                },
             )
 
         summary.files_scanned += len(records)
@@ -331,7 +319,6 @@ def scan(
         bulk_copied = detect_bulk_copy(records)
         if bulk_copied:
             summary.dirs_bulk_copied += 1
-        cache.set_dir_flag(str(directory), bulk_copied)
 
         # Infer timestamps
         time_changes: list[ProposedChange] = []
@@ -384,10 +371,8 @@ def scan(
 
         # Sort by best confidence (descending) so --limit prioritizes
         # high-confidence changes regardless of type (time vs GPS)
-        conf_order = {Confidence.HIGH: 3, Confidence.MED: 2, Confidence.LOW: 1, Confidence.NONE: 0}
         unique_changes.sort(
-            key=lambda c: max(conf_order.get(c.time_confidence, 0),
-                              conf_order.get(c.gps_confidence, 0)),
+            key=lambda c: max(c.time_confidence.rank, c.gps_confidence.rank),
             reverse=True,
         )
 

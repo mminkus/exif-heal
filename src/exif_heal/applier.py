@@ -85,11 +85,8 @@ def apply_changes(
         return summary
 
     # Filter by confidence and gating
-    confidence_order = {
-        "none": 0, "low": 1, "med": 2, "high": 3,
-    }
-    min_time_val = confidence_order.get(min_confidence_time.value, 2)
-    min_gps_val = confidence_order.get(min_confidence_gps.value, 2)
+    min_time_val = min_confidence_time.rank
+    min_gps_val = min_confidence_gps.rank
 
     eligible = []
     for change in pending:
@@ -103,8 +100,8 @@ def apply_changes(
         # Re-evaluate gating at apply time using the apply's thresholds,
         # not the scan's pre-set gated_time/gated_gps flags
         provenance = change.get("provenance", {})
-        time_conf_val = confidence_order.get(provenance.get("time_confidence", "none"), 0)
-        gps_conf_val = confidence_order.get(provenance.get("gps_confidence", "none"), 0)
+        time_conf_val = Confidence(provenance.get("time_confidence", "none")).rank
+        gps_conf_val = Confidence(provenance.get("gps_confidence", "none")).rank
 
         time_gated = has_time and time_conf_val < min_time_val
         gps_gated = has_gps and gps_conf_val < min_gps_val
